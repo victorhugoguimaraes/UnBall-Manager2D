@@ -1,0 +1,9 @@
+build/
+build-*/
+.vscode/
+*.user
+*.swp
+gmon.out
+profile.txt
+config/local.json
+runs/
