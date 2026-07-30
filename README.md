@@ -63,8 +63,6 @@ Execute o programa a partir do terminal para abrir a interface gráfica:
 ```
 
 ### 1. Configurando o Ambiente (Aba "Configuração")
-![Aba Configuração](assets/configuracao.png)
-
 Ao iniciar pela primeira vez, você precisará informar onde o software deve procurar as ferramentas do `rcsssetup`. Vá na aba **Configuração** e defina:
 
 - **Pasta base do RoboCup:** O diretório principal (ex: `~/rcss`).
@@ -90,8 +88,6 @@ O software permite gerenciar a nossa estratégia e os adversários de forma prá
 Para não perder tempo adicionando um por um, clique no botão **Importar da pasta 'teams'**. O UnBall-Manager2D irá vasculhar recursivamente a pasta `~/rcss/teams` do `rcsssetup` e adicionará automaticamente todos os adversários das ligas passadas (rc2024, rc2023, etc) na sua lista!
 
 ### 3. Iniciando uma Partida de Teste (Aba "Nova Partida")
-![Aba Nova Partida](assets/nova_partida.png)
-
 1. Vá para a aba **Nova Partida**.
 2. Escale a **UnBall** de um lado, e um adversário (ex: Helios ou Cyrus) do outro.
 3. Se quiser testar movimentações ou arrastar a bola/jogadores pelo monitor (muito útil para debugar a estratégia), marque a caixa **Modo Coach (Teste)**.
@@ -100,8 +96,6 @@ Para não perder tempo adicionando um por um, clique no botão **Importar da pas
 Quando terminar de assistir, clique no botão **Finalizar partida** para matar o servidor e todos os executáveis dos times instantaneamente, deixando o ambiente limpo para o próximo teste!
 
 ### 4. Controle Rápido (Aba "Painel")
-![Aba Painel](assets/painel.png)
-
 A aba **Painel** fornece um atalho para subir o servidor manualmente e, o mais importante, possui um botão de "Encerrar processos da sessão" que age como um botão de pânico caso você precise forçar o encerramento de qualquer resquício de processos do RoboCup que estejam travando sua máquina.
 
 ---
