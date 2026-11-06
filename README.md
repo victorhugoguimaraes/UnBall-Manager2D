@@ -103,5 +103,3 @@ Teste opcional com servidor e estratégia reais, sem monitor:
 ```
 
 Esse teste também exporta os CSVs com a fila usada pelo Manager. Ele exige um `bin/start.sh` que aceite `-p`, `-P` e `-t`, bibliotecas do servidor/time no ambiente e portas UDP 16000 a 16002 livres. Ele executa uma partida curta com dois nomes de time distintos, exige 22 conexões de jogadores, término normal e geração de replay.
-
-Veja a [revisão de código e interface](docs/REVISAO.md) para os problemas encontrados, correções e limites desta atualização.
