@@ -27,3 +27,6 @@ private:
 };
 
 bool isValidTeam(const Team& team, std::string& reason);
+// Returns a runnable launcher, including the common bin/ layouts.
+std::filesystem::path findTeamLauncher(const std::filesystem::path& root);
+std::vector<Team> discoverTeams(const std::filesystem::path& directory);

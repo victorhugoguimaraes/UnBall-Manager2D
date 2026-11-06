@@ -1,104 +1,107 @@
 # UnBall-Manager2D
 
-O **UnBall-Manager2D** é uma ferramenta gráfica desenvolvida para auxiliar a equipe **UnBall (RoboCup 2D)** nos testes e simulações de partidas.
+Interface nativa em C++20 e wxWidgets para cadastrar times, iniciar partidas do RoboCup 2D e abrir replays. Compatível com Linux e WSL com interface gráfica.
 
-Seu objetivo principal é permitir que os desenvolvedores da UnBall configurem partidas rapidamente, validem o código, importem adversários e visualizem os logs e monitores, tudo isso sem precisar lidar diretamente com diversos scripts e comandos complexos no terminal.
+## Compilar e executar
 
-O desenvolvimento e os testes assumem que você tenha acesso prévio à base/estratégia privada da equipe UnBall.
-
----
-
-## Instalação de Dependências
-
-O UnBall-Manager2D foi desenvolvido para ser executado no Linux ou através do Windows Subsystem for Linux (WSL).
-
-Para compilar e executar o software, instale as seguintes dependências (exemplo para Ubuntu/Debian):
+No Ubuntu/Debian, instale as dependências:
 
 ```bash
-sudo apt update
-sudo apt install build-essential cmake libwxgtk3.2-dev nlohmann-json3-dev
-```
-
-## Preparando o Ambiente RoboCup (Recomendado)
-
-O aplicativo precisa interagir com as ferramentas da liga RoboCup 2D. Se você ainda não as possui instaladas, a maneira recomendada de configurá-las é através do projeto oficial de instalação `rcsssetup`.
-
-1. Instale as dependências básicas:
-   ```bash
-   sudo apt-get install -y git python3 python3-pip git-lfs
-   ```
-
-2. Clone e execute o `rcsssetup`:
-   ```bash
-   git clone https://github.com/omusymcomp/rcsssetup.git
-   cd rcsssetup
-   python3 setup.py
-   ```
-
-Essa instalação criará a pasta `~/rcss` contendo todas as ferramentas (`rcssserver`, `rcssmonitor`), o script `auto_match.py` e dezenas de times adversários (como Helios, Oxsy, etc) organizados na pasta `~/rcss/teams`.
-
----
-
-## Compilação do UnBall-Manager2D
-
-Após ter as dependências instaladas, compile o projeto usando o CMake:
-
-```bash
-# Entre na pasta do UnBall-Manager2D
-cd UnBall-Manager2D
-
-# Configure e construa o executável
-cmake -S . -B build
-cmake --build build -j"$(nproc)"
-```
-
----
-
-## Como Utilizar o Software
-
-Execute o programa a partir do terminal para abrir a interface gráfica:
-
-```bash
+sudo apt install build-essential cmake libwxgtk3.2-dev nlohmann-json3-dev python3
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j4
 ./build/UnBall-Manager2D
 ```
 
-### 1. Configurando o Ambiente (Aba "Configuração")
-Ao iniciar pela primeira vez, você precisará informar onde o software deve procurar as ferramentas do `rcsssetup`. Vá na aba **Configuração** e defina:
+Instale o servidor, o monitor e os times separadamente. O [rcsssetup](https://github.com/omusymcomp/rcsssetup) é uma opção para preparar esse ambiente. A compilação do Manager e seus testes unitários não exigem a estratégia privada da UnBall.
 
-- **Pasta base do RoboCup:** O diretório principal (ex: `~/rcss`).
-- **rcssserver:** O executável do servidor (ex: `/usr/local/bin/rcssserver`).
-- **rcssmonitor (opcional):** O monitor gráfico para visualizar o jogo (ex: `/usr/local/bin/rcssmonitor`).
-- **auto_match.py:** O script Python responsável por orquestrar a partida (geralmente em `~/rcss/auto_match.py` ou dentro da pasta do repositório `rcsssetup`).
+## Preparar uma partida
 
-Clique em **Salvar configuração**.
+1. Em **Configuração**, escolha a pasta base do RoboCup e o executável `rcssserver`. O `rcssmonitor` é opcional. Salve os caminhos.
+2. Em **Times**, adicione a pasta de cada time ou importe os times de `<pasta base>/teams`. A importação procura inicializadores até cinco níveis de diretórios.
+3. Use **Validar selecionado** para conferir se existe um inicializador executável. São reconhecidos `start.sh`, `start`, `start_team`, `startAll`, `startAll.sh`, `startlocal`, `startlocal.sh`, `start_team.sh` e `localStartAll`, na raiz ou em `bin`/`bins`.
+4. Em **Partida**, escolha dois times e clique em **Iniciar partida**. A opção Coach permite mover bola e jogadores pelo monitor.
+5. Acompanhe a saída em **Eventos**. Use **Encerrar sessão** para solicitar a parada dos processos e aguardar a gravação dos logs.
 
-### 2. Configurando o Time da UnBall e os Adversários (Aba "Times")
-O software permite gerenciar a nossa estratégia e os adversários de forma prática.
+O Manager executa o inicializador de cada pasta cadastrada, usando a pasta do próprio inicializador como diretório de trabalho. Cada time precisa estar compilado e seu script deve conectar a `localhost` nas portas padrão do servidor. Os nomes anunciados pelos scripts precisam ser distintos: o nome no cadastro identifica o time, mas não reescreve argumentos de scripts de terceiros. Ajuste scripts que exigirem parâmetros ou bibliotecas específicas antes de cadastrá-los.
 
-**Para adicionar o nosso time:**
-1. Faça o clone do repositório da nossa estratégia dentro da pasta do rcsssetup:
-   ```bash
-   git clone <URL_DO_REPOSITORIO_DA_UNBALL> ~/rcss/teams/UnBall
-   ```
-2. Na aba **Times**, clique em **Adicionar time** e selecione a pasta recém-clonada (`~/rcss/teams/UnBall`).
-3. Dê o nome de exibição (ex: `UnBall Team`).
-4. **Importante:** Com o time na lista, clique em **Validar selecionado**. O gerenciador verificará se a estrutura de inicialização (como o `start.sh`) está correta e oferecerá a opção de gerá-la automaticamente caso você não a tenha.
+O campo `auto_match.py` continua disponível para compatibilidade com configurações antigas, mas não participa da execução das partidas.
 
-**Para adicionar os adversários:**
-Para não perder tempo adicionando um por um, clique no botão **Importar da pasta 'teams'**. O UnBall-Manager2D irá vasculhar recursivamente a pasta `~/rcss/teams` do `rcsssetup` e adicionará automaticamente todos os adversários das ligas passadas (rc2024, rc2023, etc) na sua lista!
+## Trabalhar pelo histórico
 
-### 3. Iniciando uma Partida de Teste (Aba "Nova Partida")
-1. Vá para a aba **Nova Partida**.
-2. Escale a **UnBall** de um lado, e um adversário (ex: Helios ou Cyrus) do outro.
-3. Se quiser testar movimentações ou arrastar a bola/jogadores pelo monitor (muito útil para debugar a estratégia), marque a caixa **Modo Coach (Teste)**.
-4. Clique em **Preparar sessão**. O servidor subirá automaticamente e o `rcssmonitor` será aberto.
+Use **Histórico** para buscar por time, data ou identificador. Os filtros mostram todas as partidas, as que têm CSVs, as que têm avisos/falhas ou as que ainda não têm CSVs. A seleção é mantida nas atualizações.
 
-Quando terminar de assistir, clique no botão **Finalizar partida** para matar o servidor e todos os executáveis dos times instantaneamente, deixando o ambiente limpo para o próximo teste!
+- **Abrir CSVs** ou duplo clique abre os dados da última exportação válida.
+- **Assistir replay** abre o RCG associado àquela partida.
+- **Usar estes times** carrega o confronto em Partida, pronto para iniciar.
+- **Abrir pasta** mostra logs, versões anteriores e os arquivos da sessão.
 
-### 4. Controle Rápido (Aba "Painel")
-A aba **Painel** fornece um atalho para subir o servidor manualmente e, o mais importante, possui um botão de "Encerrar processos da sessão" que age como um botão de pânico caso você precise forçar o encerramento de qualquer resquício de processos do RoboCup que estejam travando sua máquina.
+Os últimos times usados são lembrados entre aberturas. Atalhos: **Ctrl+Enter** inicia a partida; **Ctrl+H** abre o histórico e foca a busca; **Ctrl+L** abre os eventos; **F5** atualiza histórico e replays. O servidor isolado fica em **Configuração**.
 
----
+## Arquivos de cada sessão
 
-## Links Importantes
-- **Base de Instalação (rcsssetup):** [https://github.com/omusymcomp/rcsssetup](https://github.com/omusymcomp/rcsssetup)
+Cada execução cria uma pasta exclusiva dentro de:
+
+```text
+<pasta base>/runs/UnBall-Manager2D/AAAA-MM-DD/hora_confronto_id/
+  match.json                       identificação, times e data da partida
+  logs/                            RCG e RCL originais
+  exports/
+    latest.json                    aponta para a última exportação válida
+    versions/data_hora_id/
+      manifest.json                fontes, contagens e integridade
+      csv/                         os onze arquivos CSV
+  runtime/
+    config/                        configurações isoladas do servidor
+    launchers/                     inicializadores da sessão
+    console.log                    saída do servidor
+    session-state.json             estado da execução
+    extraction.json                estado da extração
+    extraction-console.log         saída do extrator
+```
+
+Sessões antigas continuam disponíveis, inclusive com arquivos diretamente na raiz. A atualização não move nem apaga esses arquivos. **Abrir pasta da sessão** dá acesso a esses arquivos. O Manager usa `RCSS_CONF_DIR` por processo e carrega `config/session.conf` como complemento. Assim, cada servidor gera configurações compatíveis com sua própria versão, sem editar `~/.rcssserver` ou as pastas dos times.
+
+A parada começa com SIGINT, passa a SIGTERM após três segundos e usa SIGKILL após quatro segundos se necessário. Só os grupos iniciados pelo Manager recebem esses sinais. Scripts que deliberadamente se desligarem do grupo de processos precisam ser adaptados para permitir o gerenciamento da sessão.
+
+Em **Replays antigos**, a busca inclui subpastas de `runs/UnBall-Manager2D`, `log` e `log_analysis/log` até doze níveis. Somente arquivos `.rcg` e `.rcg.gz` são listados. Também é possível escolher um arquivo manualmente.
+
+Os cadastros e caminhos ficam no diretório de dados do aplicativo, normalmente `~/.UnBall-Manager2D`. A gravação usa substituição atômica; um erro ao salvar mantém o arquivo anterior.
+
+## Extração automática para CSV
+
+Ao encerrar uma partida, o Manager exporta os logs em segundo plano. A aba **Histórico** lista as sessões, o estado da extração e a cobertura da partida. **Abrir CSVs** abre a última exportação válida; **Reprocessar dados** cria uma nova versão; **Ver problemas** apresenta erros e avisos.
+
+São gerados onze CSVs: partida, bola, jogadores, arbitragem, placar, comandos recebidos, parâmetros, resumos por time e jogador, qualidade e dicionário dos campos. Os dados ficam em `<sessão>/exports/versions/<versão>/csv/`; `exports/latest.json` aponta para a versão mais recente concluída.
+
+O extrator exige Python 3.10 ou superior e usa somente a biblioteca padrão. Suporta RCG textual ULG6 e comandos Recv do RCL, inclusive comprimidos com gzip. Mantém os logs originais, distingue ausências de zeros e permite exportar partidas interrompidas com cobertura explícita. Fechar a janela normalmente aguarda a exportação; uma interrupção forçada pode ser recuperada pelo reprocessamento.
+
+[Veja o formato dos dados, as regras de limpeza e o uso por terminal](docs/EXTRACAO.md).
+
+## Validar mudanças
+
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+Os testes de cadastro, sessões, processos, fila de exportação e leitor Python usam diretórios temporários e verificações ativas também em Release. O núcleo `manager-core` permite testar essas regras sem abrir a interface.
+
+Teste opcional da interface em um display X11 isolado já iniciado:
+
+```bash
+cmake -S . -B build -DUNBALL_ENABLE_GUI_TESTS=ON
+cmake --build build -j4
+GDK_BACKEND=x11 DISPLAY=:97 ./build/ManagerUiTests
+```
+
+Defina `UNBALL_UI_SCREENSHOT_DIR` para salvar imagens durante esse teste. Ele usa cadastro e servidor fictícios próprios.
+
+Teste opcional com servidor e estratégia reais, sem monitor:
+
+```bash
+./build/SessionSmokeTest /caminho/rcssserver /caminho/estrategia/bin /tmp/manager-smoke
+```
+
+Esse teste também exporta os CSVs com a fila usada pelo Manager. Ele exige um `bin/start.sh` que aceite `-p`, `-P` e `-t`, bibliotecas do servidor/time no ambiente e portas UDP 16000 a 16002 livres. Ele executa uma partida curta com dois nomes de time distintos, exige 22 conexões de jogadores, término normal e geração de replay.
+
+Veja a [revisão de código e interface](docs/REVISAO.md) para os problemas encontrados, correções e limites desta atualização.

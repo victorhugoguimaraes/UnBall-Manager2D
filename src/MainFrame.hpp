@@ -1,21 +1,27 @@
 #pragma once
 
 #include "TeamStore.hpp"
+#include "ChildProcess.hpp"
+#include "Session.hpp"
+#include "DataExport.hpp"
 
 #include <wx/frame.h>
-#include <wx/process.h>
 
 #include <filesystem>
 #include <memory>
 #include <vector>
+#include <fstream>
 #include <wx/timer.h>
 
-class wxOwnerDrawnComboBox;
+class wxComboBox;
 class wxListCtrl;
 class wxStaticText;
 class wxStatusBar;
 class wxTextCtrl;
 class wxCheckBox;
+class wxNotebook;
+class wxSearchCtrl;
+class wxChoice;
 
 class MainFrame final : public wxFrame {
 public:
@@ -41,17 +47,40 @@ private:
     void onWatchManualReplay(wxCommandEvent& event);
     void onStartServer(wxCommandEvent& event);
     void onStopAll(wxCommandEvent& event);
-    void onProcessTerminated(wxProcessEvent& event);
+    void onClose(wxCloseEvent& event);
+    void onOpenSessionDirectory(wxCommandEvent& event);
     void onPollProcessOutput(wxTimerEvent& event);
-    std::filesystem::path createRunDirectory() const;
     void startMonitorIfAvailable();
     void stopManagedProcesses();
     void appendEvent(const wxString& text);
     void report(const wxString& text);
     void loadEnvironment();
-    void saveEnvironment() const;
     void updateEnvironmentStatus();
     void refreshReplays();
+    void refreshDataSessions();
+    void filterDataSessions();
+    void updateHistoryDetail();
+    void onHistoryReplay(wxCommandEvent& event);
+    void onHistoryFolder(wxCommandEvent& event);
+    void onReuseTeams(wxCommandEvent& event);
+    void rememberMatch();
+    void restoreMatch();
+    void onReprocessData(wxCommandEvent& event);
+    void onOpenData(wxCommandEvent& event);
+    void onDataProblems(wxCommandEvent& event);
+    void markSessionEnded(bool stopRequested);
+    enum class ProcessRole { Session, Monitor, Replay };
+    struct ProcessEntry {
+        std::unique_ptr<ChildProcess> process;
+        std::string pendingOutput;
+        ProcessRole role;
+    };
+    long launchProcess(const std::vector<std::string>& arguments, ProcessRole role,
+                       const std::filesystem::path& directory = {},
+                       const std::map<std::string, std::string>& environment = {});
+    void launchSession(const Team* left = nullptr, const Team* right = nullptr);
+    void watchReplay(const std::filesystem::path& path);
+    void updateSessionState();
 
     std::filesystem::path appData_;
     TeamStore store_;
@@ -60,8 +89,8 @@ private:
     std::filesystem::path monitorExecutable_;
     std::filesystem::path autoMatchScript_;
     wxListCtrl* teamList_{};
-    wxOwnerDrawnComboBox* leftTeam_{};
-    wxOwnerDrawnComboBox* rightTeam_{};
+    wxComboBox* leftTeam_{};
+    wxComboBox* rightTeam_{};
     wxCheckBox* coachModeCheck_{};
     wxTextCtrl* events_{};
     wxStaticText* environment_{};
@@ -71,7 +100,23 @@ private:
     wxTextCtrl* monitorField_{};
     wxTextCtrl* autoMatchField_{};
     wxListCtrl* replayList_{};
+    wxListCtrl* dataList_{};
+    wxNotebook* notebook_{};
+    wxSearchCtrl* historySearch_{};
+    wxChoice* historyFilter_{};
+    wxStaticText* historyDetail_{};
+    std::vector<DataSession> allDataSessions_;
+    std::vector<DataSession> dataSessions_;
+    std::unique_ptr<DataExport> exporter_;
+    bool stopRequested_{};
     std::vector<std::filesystem::path> currentReplays_;
-    std::vector<std::unique_ptr<wxProcess>> processes_;
+    std::vector<ProcessEntry> processes_;
+    SessionFiles activeSession_;
+    std::ofstream sessionLog_;
+    long sessionPid_{};
+    bool stopping_{};
+    bool closing_{};
+    wxStaticText* sessionState_{};
+    wxString environmentWarning_;
     wxTimer outputTimer_;
 };

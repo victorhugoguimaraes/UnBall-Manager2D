@@ -7,3 +7,6 @@ gmon.out
 profile.txt
 config/local.json
 runs/
+
+__pycache__/
+*.py[cod]

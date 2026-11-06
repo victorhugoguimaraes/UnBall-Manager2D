@@ -1,7 +1,13 @@
 #include "MainFrame.hpp"
 
 #include <wx/button.h>
-#include <wx/odcombo.h>
+#include <wx/accel.h>
+#include <wx/srchctrl.h>
+#include <wx/choice.h>
+#include <wx/combobox.h>
+#include <wx/wrapsizer.h>
+#include "FileIO.hpp"
+#include <unistd.h>
 #include <wx/dirdlg.h>
 #include <wx/datetime.h>
 #include <wx/dialog.h>
@@ -43,6 +49,7 @@ enum class ControlId : int {
     ValidateAllTeams,
     PrepareMatch = wxID_HIGHEST + 30,
     StopMatch,
+    OpenSessionDirectory,
     ChooseBaseDirectory = wxID_HIGHEST + 40,
     ChooseServer,
     ChooseMonitor,
@@ -50,6 +57,15 @@ enum class ControlId : int {
     RefreshReplays = wxID_HIGHEST + 50,
     WatchSelectedReplay,
     WatchManualReplay,
+    RefreshData = wxID_HIGHEST + 60,
+    ReprocessData,
+    OpenData,
+    DataProblems,
+    HistoryReplay,
+    HistoryFolder,
+    ReuseTeams,
+    GoHistory,
+    GoEvents,
 };
 
 constexpr int controlId(ControlId id) { return static_cast<int>(id); }
@@ -70,18 +86,6 @@ wxString findCommandOnPath(const wxString& command) {
         if (candidate.FileExists()) return candidate.GetFullPath();
     }
     return {};
-}
-
-wxString shellQuote(const std::filesystem::path& path) {
-    wxString value = pathString(path);
-    value.Replace("'", "'\\\"'\\\"'");
-    return "'" + value + "'";
-}
-
-wxString shellQuote(const std::string& value) {
-    wxString escaped = wxString::FromUTF8(value);
-    escaped.Replace("'", "'\\\"'\\\"'");
-    return "'" + escaped + "'";
 }
 
 std::filesystem::path defaultAutoMatchPath() {
@@ -136,95 +140,106 @@ MainFrame::MainFrame()
     catch (const std::exception& error) {
         wxMessageBox("Nao foi possivel ler os times: " + wxString::FromUTF8(error.what()), "UnBall-Manager2D", wxICON_WARNING);
     }
+    const auto executableDirectory = std::filesystem::path(wxStandardPaths::Get().GetExecutablePath().ToStdString()).parent_path();
+    auto extractorDirectory = executableDirectory / "extractor";
+    if (!std::filesystem::is_directory(extractorDirectory / "unball_extract"))
+        extractorDirectory = executableDirectory.parent_path() / "share/unball-manager/extractor";
+    exporter_ = std::make_unique<DataExport>("python3", extractorDirectory);
     loadEnvironment();
     buildUi();
     refreshTeams();
+    restoreMatch();
     refreshReplays();
+    refreshDataSessions();
+    if (!environmentWarning_.empty()) report(environmentWarning_);
 }
 
 MainFrame::~MainFrame() {
-    stopManagedProcesses();
+    outputTimer_.Stop();
 }
 
 void MainFrame::buildUi() {
+    SetMinSize(FromDIP(wxSize(780, 540)));
     auto* notebook = new wxNotebook(this, wxID_ANY);
-
-    auto* dashboard = new wxPanel(notebook);
-    auto* dashboardSizer = new wxBoxSizer(wxVERTICAL);
-    environment_ = new wxStaticText(dashboard, wxID_ANY, "Verificando ambiente...");
-    dashboardSizer->Add(environment_, 0, wxALL, 12);
-    dashboardSizer->Add(new wxStaticText(dashboard, wxID_ANY,
-        "Instale times e ferramentas externamente (recomendado: rcsssetup). O gerenciador apenas os utiliza."), 0, wxLEFT | wxRIGHT, 12);
-    auto* actions = new wxBoxSizer(wxHORIZONTAL);
-    addButton(dashboard, actions, "Iniciar somente servidor", ControlId::StartServer);
-    addButton(dashboard, actions, "Encerrar processos da sessao", ControlId::StopAll);
-    dashboardSizer->Add(actions, 0, wxALL, 7);
-    dashboard->SetSizer(dashboardSizer);
-    notebook->AddPage(dashboard, "Painel");
+    notebook_ = notebook;
 
     auto* configuration = new wxPanel(notebook);
     auto* configurationSizer = new wxFlexGridSizer(3, 8, 8);
     configurationSizer->Add(new wxStaticText(configuration, wxID_ANY, "Pasta base do RoboCup:"), 0, wxALIGN_CENTER_VERTICAL);
     baseDirectoryField_ = new wxTextCtrl(configuration, wxID_ANY, pathString(baseDirectory_));
+    baseDirectoryField_->SetName("Pasta base do RoboCup");
     configurationSizer->Add(baseDirectoryField_, 1, wxEXPAND);
     addButton(configuration, configurationSizer, "Procurar...", ControlId::ChooseBaseDirectory);
     configurationSizer->Add(new wxStaticText(configuration, wxID_ANY, "rcssserver:"), 0, wxALIGN_CENTER_VERTICAL);
     serverField_ = new wxTextCtrl(configuration, wxID_ANY, pathString(serverExecutable_));
+    serverField_->SetName("Executável do servidor");
     configurationSizer->Add(serverField_, 1, wxEXPAND);
     addButton(configuration, configurationSizer, "Procurar...", ControlId::ChooseServer);
     configurationSizer->Add(new wxStaticText(configuration, wxID_ANY, "rcssmonitor (opcional):"), 0, wxALIGN_CENTER_VERTICAL);
     monitorField_ = new wxTextCtrl(configuration, wxID_ANY, pathString(monitorExecutable_));
+    monitorField_->SetName("Executável do monitor");
     configurationSizer->Add(monitorField_, 1, wxEXPAND);
     addButton(configuration, configurationSizer, "Procurar...", ControlId::ChooseMonitor);
-    configurationSizer->Add(new wxStaticText(configuration, wxID_ANY, "auto_match.py:"), 0, wxALIGN_CENTER_VERTICAL);
+    configurationSizer->Add(new wxStaticText(configuration, wxID_ANY, "auto_match.py (legado, opcional):"), 0, wxALIGN_CENTER_VERTICAL);
     autoMatchField_ = new wxTextCtrl(configuration, wxID_ANY, pathString(autoMatchScript_));
+    autoMatchField_->SetName("Auto match opcional");
     configurationSizer->Add(autoMatchField_, 1, wxEXPAND);
     addButton(configuration, configurationSizer, "Procurar...", ControlId::ChooseAutoMatch);
     configurationSizer->AddGrowableCol(1, 1);
     auto* configurationOuter = new wxBoxSizer(wxVERTICAL);
     configurationOuter->Add(new wxStaticText(configuration, wxID_ANY,
-        "Escolha os caminhos da sua instalacao. O UnBall-Manager2D nao instala nem altera essas ferramentas."), 0, wxALL, 12);
+        "Escolha os caminhos da sua instalação. O UnBall-Manager2D nao instala nem altera essas ferramentas."), 0, wxALL, 12);
     configurationOuter->Add(configurationSizer, 0, wxEXPAND | wxLEFT | wxRIGHT, 12);
-    addButton(configuration, configurationOuter, "Salvar configuracao", ControlId::SaveEnvironment);
+    addButton(configuration, configurationOuter, "Salvar configuração", ControlId::SaveEnvironment);
+    environment_ = new wxStaticText(configuration, wxID_ANY, "Verificando ambiente...");
+    configurationOuter->Add(environment_, 0, wxALL, 12);
+    addButton(configuration, configurationOuter, "Iniciar somente servidor", ControlId::StartServer);
     configuration->SetSizer(configurationOuter);
-    notebook->AddPage(configuration, "Configuracao");
+    notebook->AddPage(configuration, "Configuração");
 
     auto* teams = new wxPanel(notebook);
     auto* teamsSizer = new wxBoxSizer(wxVERTICAL);
     teamList_ = new wxListCtrl(teams, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT | wxLC_SINGLE_SEL);
     teamList_->AppendColumn("Time", wxLIST_FORMAT_LEFT, 180);
     teamList_->AppendColumn("Nome no servidor", wxLIST_FORMAT_LEFT, 150);
-    teamList_->AppendColumn("Protecao", wxLIST_FORMAT_LEFT, 100);
+    teamList_->AppendColumn("Inicialização", wxLIST_FORMAT_LEFT, 100);
     teamList_->AppendColumn("Pasta", wxLIST_FORMAT_LEFT, 440);
     teamsSizer->Add(teamList_, 1, wxEXPAND | wxALL, 8);
-    auto* teamActions = new wxBoxSizer(wxHORIZONTAL);
+    auto* teamActions = new wxWrapSizer(wxHORIZONTAL);
     addButton(teams, teamActions, "Adicionar time", ControlId::AddTeam);
     addButton(teams, teamActions, "Importar da pasta 'teams'", ControlId::ImportTeams);
     addButton(teams, teamActions, "Validar selecionado", ControlId::ValidateTeam);
     addButton(teams, teamActions, "Validar todos", ControlId::ValidateAllTeams);
     addButton(teams, teamActions, "Remover selecionado", ControlId::RemoveTeam);
-    teamsSizer->Add(teamActions, 0, wxLEFT | wxBOTTOM, 3);
+    teamsSizer->Add(teamActions, 0, wxEXPAND | wxLEFT | wxBOTTOM, 3);
     teams->SetSizer(teamsSizer);
     notebook->AddPage(teams, "Times");
 
     auto* match = new wxPanel(notebook);
     auto* matchSizer = new wxFlexGridSizer(2, 8, 8);
     matchSizer->Add(new wxStaticText(match, wxID_ANY, "Time esquerdo:"), 0, wxALIGN_CENTER_VERTICAL);
-    leftTeam_ = new wxOwnerDrawnComboBox(match, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, 0, nullptr, wxCB_READONLY); matchSizer->Add(leftTeam_, 1, wxEXPAND);
+    leftTeam_ = new wxComboBox(match, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, 0, nullptr, wxCB_READONLY); matchSizer->Add(leftTeam_, 1, wxEXPAND);
     matchSizer->Add(new wxStaticText(match, wxID_ANY, "Time direito:"), 0, wxALIGN_CENTER_VERTICAL);
-    rightTeam_ = new wxOwnerDrawnComboBox(match, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, 0, nullptr, wxCB_READONLY); matchSizer->Add(rightTeam_, 1, wxEXPAND);
+    rightTeam_ = new wxComboBox(match, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, 0, nullptr, wxCB_READONLY); matchSizer->Add(rightTeam_, 1, wxEXPAND);
     matchSizer->AddGrowableCol(1, 1);
     auto* matchOuter = new wxBoxSizer(wxVERTICAL);
+    sessionState_ = new wxStaticText(match, wxID_ANY, "Escolha os times para iniciar uma partida.");
+    matchOuter->Add(sessionState_, 0, wxALL, 12);
     matchOuter->Add(new wxStaticText(match, wxID_ANY,
-        "O cadastro guarda apenas uma referencia. O time precisa estar pronto e ser reconhecido pelo auto_match.py."), 0, wxALL, 12);
+        "Ctrl+Enter inicia a partida. Ctrl+H abre o histórico."), 0, wxALL, 12);
+    sessionState_->SetName("Estado da sessão");
+    leftTeam_->SetName("Time esquerdo");
+    rightTeam_->SetName("Time direito");
     matchOuter->Add(matchSizer, 0, wxEXPAND | wxLEFT | wxRIGHT, 12);
     
-    coachModeCheck_ = new wxCheckBox(match, wxID_ANY, "Modo Coach (Teste) - Permite arrastar bola/jogadores");
+    coachModeCheck_ = new wxCheckBox(match, wxID_ANY, "Permitir mover bola e jogadores no monitor (modo Coach)");
     matchOuter->Add(coachModeCheck_, 0, wxALL, 12);
     
-    auto* matchBtns = new wxBoxSizer(wxHORIZONTAL);
-    addButton(match, matchBtns, "Preparar sessao", ControlId::PrepareMatch);
-    addButton(match, matchBtns, "Finalizar partida", ControlId::StopMatch);
+    auto* matchBtns = new wxWrapSizer(wxHORIZONTAL);
+    auto* startMatch = addButton(match, matchBtns, "Iniciar partida", ControlId::PrepareMatch);
+    startMatch->SetToolTip("Iniciar com os times selecionados (Ctrl+Enter)");
+    addButton(match, matchBtns, "Encerrar sessão", ControlId::StopMatch);
+    addButton(match, matchBtns, "Abrir pasta da sessão", ControlId::OpenSessionDirectory);
     matchOuter->Add(matchBtns, 0, wxEXPAND | wxLEFT | wxRIGHT, 9);
     
     match->SetSizer(matchOuter);
@@ -235,7 +250,7 @@ void MainFrame::buildUi() {
     events_ = new wxTextCtrl(monitor, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, wxTE_MULTILINE | wxTE_READONLY);
     monitorSizer->Add(events_, 1, wxEXPAND | wxALL, 8);
     monitor->SetSizer(monitorSizer);
-    notebook->AddPage(monitor, "Monitor");
+    notebook->AddPage(monitor, "Eventos");
 
     auto* replays = new wxPanel(notebook);
     auto* replaysSizer = new wxBoxSizer(wxVERTICAL);
@@ -243,13 +258,90 @@ void MainFrame::buildUi() {
     replayList_->AppendColumn("Data / Hora", wxLIST_FORMAT_LEFT, 160);
     replayList_->AppendColumn("Arquivo de Log", wxLIST_FORMAT_LEFT, 500);
     replaysSizer->Add(replayList_, 1, wxEXPAND | wxALL, 8);
-    auto* replayActions = new wxBoxSizer(wxHORIZONTAL);
+    auto* replayActions = new wxWrapSizer(wxHORIZONTAL);
     addButton(replays, replayActions, "Atualizar lista", ControlId::RefreshReplays);
     addButton(replays, replayActions, "Assistir selecionado", ControlId::WatchSelectedReplay);
     addButton(replays, replayActions, "Procurar log manualmente...", ControlId::WatchManualReplay);
-    replaysSizer->Add(replayActions, 0, wxLEFT | wxBOTTOM, 3);
+    replaysSizer->Add(replayActions, 0, wxEXPAND | wxLEFT | wxBOTTOM, 3);
     replays->SetSizer(replaysSizer);
     notebook->AddPage(replays, "Replays");
+
+    auto* data = new wxPanel(notebook);
+    auto* dataSizer = new wxBoxSizer(wxVERTICAL);
+    auto* dataHelp = new wxStaticText(data, wxID_ANY,
+        "Encontre uma partida para abrir os dados, assistir ao replay ou usar os mesmos times.");
+    dataHelp->Wrap(FromDIP(700));
+    dataSizer->Add(dataHelp, 0, wxALL, 10);
+    auto* filters = new wxBoxSizer(wxHORIZONTAL);
+    historySearch_ = new wxSearchCtrl(data, wxID_ANY, "", wxDefaultPosition, FromDIP(wxSize(320, -1)));
+    historySearch_->SetMinSize(FromDIP(wxSize(220, -1)));
+    historySearch_->SetName("Buscar partidas");
+    historySearch_->SetDescriptiveText("Buscar por time, data ou identificador");
+    historySearch_->ShowCancelButton(false);
+    filters->Add(historySearch_, 1, wxEXPAND | wxRIGHT, 8);
+    historyFilter_ = new wxChoice(data, wxID_ANY);
+    historyFilter_->SetName("Filtrar histórico");
+    for (const auto* label : {"Todas", "Com CSVs", "Avisos ou falhas", "Sem CSVs"}) historyFilter_->Append(wxString::FromUTF8(label));
+    historyFilter_->SetSelection(0);
+    filters->Add(historyFilter_, 0, wxALIGN_CENTER_VERTICAL);
+    dataSizer->Add(filters, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 10);
+    dataList_ = new wxListCtrl(data, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT | wxLC_SINGLE_SEL);
+    dataList_->SetName("Sessões e exportações de dados");
+    dataList_->AppendColumn("Data / hora", wxLIST_FORMAT_LEFT, 155);
+    dataList_->AppendColumn("Confronto", wxLIST_FORMAT_LEFT, 230);
+    dataList_->AppendColumn("Extração", wxLIST_FORMAT_LEFT, 180);
+    dataList_->AppendColumn("Cobertura", wxLIST_FORMAT_LEFT, 120);
+    historyDetail_ = new wxStaticText(data, wxID_ANY, "Inicie uma partida para criar seu histórico.");
+    historyDetail_->SetMinSize(FromDIP(wxSize(-1, 42)));
+    dataSizer->Add(dataList_, 1, wxEXPAND | wxALL, 8);
+    dataSizer->Add(historyDetail_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 10);
+    auto* dataActions = new wxWrapSizer(wxHORIZONTAL);
+
+    addButton(data, dataActions, "Abrir CSVs", ControlId::OpenData);
+    addButton(data, dataActions, "Assistir replay", ControlId::HistoryReplay);
+    addButton(data, dataActions, "Usar estes times", ControlId::ReuseTeams);
+    addButton(data, dataActions, "Abrir pasta", ControlId::HistoryFolder);
+    addButton(data, dataActions, "Reprocessar dados", ControlId::ReprocessData);
+    addButton(data, dataActions, "Ver problemas", ControlId::DataProblems);
+    addButton(data, dataActions, "Atualizar (F5)", ControlId::RefreshData);
+    dataSizer->Add(dataActions, 0, wxEXPAND | wxALL, 4);
+    data->SetSizer(dataSizer);
+    notebook->AddPage(data, "Histórico");
+    while (notebook->GetPageCount() > 0) notebook->RemovePage(0);
+    notebook->AddPage(match, "Partida");
+    notebook->AddPage(data, "Histórico");
+    notebook->AddPage(teams, "Times");
+    notebook->AddPage(replays, "Replays antigos");
+    notebook->AddPage(monitor, "Eventos");
+    notebook->AddPage(configuration, "Configuração");
+    historySearch_->Bind(wxEVT_TEXT, [this](wxCommandEvent&) { historySearch_->ShowCancelButton(!historySearch_->GetValue().empty()); filterDataSessions(); });
+    historySearch_->Bind(wxEVT_SEARCHCTRL_CANCEL_BTN, [this](wxCommandEvent&) { historySearch_->Clear(); });
+    historyFilter_->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) { filterDataSessions(); });
+    dataList_->Bind(wxEVT_LIST_ITEM_ACTIVATED, [this](wxListEvent&) {
+        wxCommandEvent event;
+        const long selected = dataList_->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
+        if (selected >= 0 && static_cast<std::size_t>(selected) < dataSessions_.size() && !dataSessions_[selected].exportDirectory.empty()) onOpenData(event);
+        else onHistoryReplay(event);
+    });
+    Bind(wxEVT_BUTTON, &MainFrame::onHistoryReplay, this, controlId(ControlId::HistoryReplay));
+    Bind(wxEVT_BUTTON, &MainFrame::onHistoryFolder, this, controlId(ControlId::HistoryFolder));
+    Bind(wxEVT_BUTTON, &MainFrame::onReuseTeams, this, controlId(ControlId::ReuseTeams));
+    Bind(wxEVT_MENU, &MainFrame::onPrepareMatch, this, controlId(ControlId::PrepareMatch));
+    Bind(wxEVT_MENU, [this](wxCommandEvent&) { notebook_->SetSelection(1); historySearch_->SetFocus(); }, controlId(ControlId::GoHistory));
+    Bind(wxEVT_MENU, [this](wxCommandEvent&) { notebook_->SetSelection(4); }, controlId(ControlId::GoEvents));
+    Bind(wxEVT_MENU, [this](wxCommandEvent&) { refreshDataSessions(); refreshReplays(); }, controlId(ControlId::RefreshData));
+    const wxAcceleratorEntry shortcuts[]{
+        {wxACCEL_CTRL, WXK_RETURN, controlId(ControlId::PrepareMatch)},
+        {wxACCEL_CTRL, 'H', controlId(ControlId::GoHistory)},
+        {wxACCEL_CTRL, 'L', controlId(ControlId::GoEvents)},
+        {wxACCEL_NORMAL, WXK_F5, controlId(ControlId::RefreshData)}
+    };
+    SetAcceleratorTable(wxAcceleratorTable(4, shortcuts));
+    dataList_->Bind(wxEVT_LIST_ITEM_SELECTED, [this](wxListEvent&) { updateSessionState(); updateHistoryDetail(); });
+    Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { refreshDataSessions(); }, controlId(ControlId::RefreshData));
+    Bind(wxEVT_BUTTON, &MainFrame::onReprocessData, this, controlId(ControlId::ReprocessData));
+    Bind(wxEVT_BUTTON, &MainFrame::onOpenData, this, controlId(ControlId::OpenData));
+    Bind(wxEVT_BUTTON, &MainFrame::onDataProblems, this, controlId(ControlId::DataProblems));
 
     auto* root = new wxBoxSizer(wxVERTICAL);
     root->Add(notebook, 1, wxEXPAND);
@@ -270,16 +362,21 @@ void MainFrame::buildUi() {
     Bind(wxEVT_BUTTON, &MainFrame::onRemoveTeam, this, controlId(ControlId::RemoveTeam));
     Bind(wxEVT_BUTTON, &MainFrame::onPrepareMatch, this, controlId(ControlId::PrepareMatch));
     Bind(wxEVT_BUTTON, &MainFrame::onStopAll, this, controlId(ControlId::StopMatch));
+    Bind(wxEVT_BUTTON, &MainFrame::onOpenSessionDirectory, this, controlId(ControlId::OpenSessionDirectory));
     Bind(wxEVT_BUTTON, &MainFrame::onRefreshReplays, this, controlId(ControlId::RefreshReplays));
     Bind(wxEVT_BUTTON, &MainFrame::onWatchSelectedReplay, this, controlId(ControlId::WatchSelectedReplay));
     Bind(wxEVT_BUTTON, &MainFrame::onWatchManualReplay, this, controlId(ControlId::WatchManualReplay));
-    Bind(wxEVT_END_PROCESS, &MainFrame::onProcessTerminated, this);
+    Bind(wxEVT_CLOSE_WINDOW, &MainFrame::onClose, this);
     Bind(wxEVT_TIMER, &MainFrame::onPollProcessOutput, this);
 
     updateEnvironmentStatus();
+    updateSessionState();
+    notebook->SetSelection(std::filesystem::is_regular_file(serverExecutable_) ? 0 : 5);
 }
 
 void MainFrame::refreshTeams() {
+    const auto previousLeft = leftTeam_->GetValue();
+    const auto previousRight = rightTeam_->GetValue();
     leftTeam_->Clear(); rightTeam_->Clear();
     teamList_->DeleteAllItems();
 
@@ -290,7 +387,7 @@ void MainFrame::refreshTeams() {
         rightTeam_->Append(label);
         teamList_->InsertItem(row, wxString::FromUTF8(team.displayName));
         teamList_->SetItem(row, 1, wxString::FromUTF8(team.teamName));
-        teamList_->SetItem(row, 2, team.protectedMode ? "Protegido" : "Autorizado");
+        teamList_->SetItem(row, 2, findTeamLauncher(team.root).empty() ? "Pendente" : "Pronto");
         teamList_->SetItem(row, 3, pathString(team.root));
         ++row;
     }
@@ -298,6 +395,9 @@ void MainFrame::refreshTeams() {
         leftTeam_->SetSelection(0);
         rightTeam_->SetSelection(store_.teams().size() > 1 ? 1 : 0);
     }
+    if (leftTeam_->FindString(previousLeft) != wxNOT_FOUND) leftTeam_->SetStringSelection(previousLeft);
+    if (rightTeam_->FindString(previousRight) != wxNOT_FOUND) rightTeam_->SetStringSelection(previousRight);
+    updateSessionState();
     report(wxString::Format("Catalogo atualizado: %lu time(s) cadastrado(s).",
         static_cast<unsigned long>(store_.teams().size())));
 }
@@ -312,32 +412,49 @@ void MainFrame::loadEnvironment() {
     try {
         std::ifstream input(file);
         const auto data = nlohmann::json::parse(input);
-        baseDirectory_ = data.value("baseDirectory", baseDirectory_.string());
-        serverExecutable_ = data.value("serverExecutable", serverExecutable_.string());
-        monitorExecutable_ = data.value("monitorExecutable", monitorExecutable_.string());
-        autoMatchScript_ = data.value("autoMatchScript", autoMatchScript_.string());
-    } catch (...) {
-        // A interface informa a ausencia do caminho; um arquivo local invalido nao impede o app de abrir.
+        const std::filesystem::path base = data.value("baseDirectory", baseDirectory_.string());
+        const std::filesystem::path server = data.value("serverExecutable", serverExecutable_.string());
+        const std::filesystem::path monitor = data.value("monitorExecutable", monitorExecutable_.string());
+        const std::filesystem::path script = data.value("autoMatchScript", autoMatchScript_.string());
+        baseDirectory_ = base; serverExecutable_ = server; monitorExecutable_ = monitor; autoMatchScript_ = script;
+    } catch (const std::exception& error) {
+        environmentWarning_ = "Configuração não carregada. Revise os caminhos na aba Configuração: " + wxString::FromUTF8(error.what());
     }
 }
 
-void MainFrame::saveEnvironment() const {
-    std::filesystem::create_directories(appData_);
-    std::ofstream output(appData_ / "environment.json");
-    output << nlohmann::json{
-        {"baseDirectory", baseDirectory_.string()},
-        {"serverExecutable", serverExecutable_.string()},
-        {"monitorExecutable", monitorExecutable_.string()},
-        {"autoMatchScript", autoMatchScript_.string()},
-    }.dump(2) << '\n';
-}
+
 
 void MainFrame::updateEnvironmentStatus() {
-    const bool serverReady = std::filesystem::is_regular_file(serverExecutable_);
-    environment_->SetLabel(serverReady
-        ? "Ferramentas configuradas. rcssserver: " + pathString(serverExecutable_)
-        : "Configure os caminhos das ferramentas na aba Configuracao.");
-    report(serverReady ? "Ambiente carregado." : "Ambiente incompleto: rcssserver nao configurado.");
+    const bool ready = std::filesystem::is_regular_file(serverExecutable_) && ::access(serverExecutable_.c_str(), X_OK) == 0;
+    environment_->SetLabel(ready ? "Servidor configurado. Escolha os times em Partida."
+        : "Escolha um servidor executável na aba Configuração.");
+}
+void MainFrame::updateSessionState() {
+    const bool busy = sessionPid_ != 0;
+    for (const auto id : {ControlId::StartServer, ControlId::PrepareMatch, ControlId::SaveEnvironment,
+                         ControlId::AddTeam, ControlId::ImportTeams, ControlId::RemoveTeam}) {
+        if (auto* control = FindWindow(controlId(id))) control->Enable(!busy && !stopping_ && !closing_);
+    }
+    if (auto* control = FindWindow(controlId(ControlId::PrepareMatch)))
+        control->Enable(!busy && !stopping_ && !closing_ && store_.teams().size() >= 2);
+    for (const auto id : {ControlId::StopAll, ControlId::StopMatch}) {
+        if (auto* control = FindWindow(controlId(id))) control->Enable(!processes_.empty() && !stopping_);
+    }
+    if (auto* control = FindWindow(controlId(ControlId::OpenSessionDirectory))) control->Enable(!activeSession_.directory.empty());
+    leftTeam_->Enable(!busy); rightTeam_->Enable(!busy); coachModeCheck_->Enable(!busy);
+    const long selectedData = dataList_->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
+    const bool hasData = selectedData >= 0 && static_cast<std::size_t>(selectedData) < dataSessions_.size();
+    const DataSession* selectedSession = hasData ? &dataSessions_.at(static_cast<std::size_t>(selectedData)) : nullptr;
+    FindWindow(controlId(ControlId::ReprocessData))->Enable(selectedSession && !closing_ &&
+        !(busy && selectedSession->directory == std::filesystem::weakly_canonical(activeSession_.directory)) && !exporter_->contains(selectedSession->directory));
+    FindWindow(controlId(ControlId::OpenData))->Enable(selectedSession && !selectedSession->exportDirectory.empty());
+    FindWindow(controlId(ControlId::DataProblems))->Enable(hasData);
+    FindWindow(controlId(ControlId::HistoryFolder))->Enable(hasData);
+    FindWindow(controlId(ControlId::HistoryReplay))->Enable(selectedSession && !selectedSession->replay.empty() && !monitorExecutable_.empty() && !(busy && selectedSession->directory == std::filesystem::weakly_canonical(activeSession_.directory)));
+    FindWindow(controlId(ControlId::ReuseTeams))->Enable(selectedSession && !selectedSession->leftRoot.empty() && !selectedSession->rightRoot.empty() && !busy && !stopping_ && !closing_);
+    sessionState_->SetLabel(stopping_ ? "Encerrando os processos da sessão e aguardando a gravação dos logs…"
+        : busy ? "Sessão em execução. Consulte a saída na aba Eventos."
+        : "Nenhuma sessão em execução. Escolha dois times em Partida.");
 }
 
 void MainFrame::onAddTeam(wxCommandEvent&) {
@@ -350,7 +467,7 @@ void MainFrame::onAddTeam(wxCommandEvent&) {
     wxTextEntryDialog name(this, "Nome exibido do time:", "Adicionar time", suggestedName);
     if (name.ShowModal() != wxID_OK || name.GetValue().empty()) { report("Cadastro de time cancelado."); return; }
     wxTextEntryDialog serverName(this,
-        "Nome do diretorio aceito pelo auto_match.py:", "Adicionar time", suggestedName);
+        "Nome de identificação do time (distinto do adversário):", "Adicionar time", suggestedName);
     if (serverName.ShowModal() != wxID_OK || serverName.GetValue().empty()) { report("Cadastro de time cancelado."); return; }
     Team team{name.GetValue().ToStdString(), serverName.GetValue().ToStdString(), selectedRoot, true};
 
@@ -372,183 +489,49 @@ void MainFrame::onAddTeam(wxCommandEvent&) {
 }
 
 void MainFrame::onImportTeams(wxCommandEvent&) {
-    if (!std::filesystem::is_directory(baseDirectory_)) {
-        wxMessageBox("Configure a pasta base do RoboCup na aba Configuracao antes de importar.", "Importar times", wxICON_WARNING);
-        return;
-    }
-    const auto teamsFolder = baseDirectory_ / "teams";
-    if (!std::filesystem::is_directory(teamsFolder)) {
-        wxMessageBox("A pasta 'teams' nao foi encontrada dentro da pasta base.", "Importar times", wxICON_WARNING);
-        return;
-    }
-
-    report("Procurando times em " + pathString(teamsFolder) + "...");
-    int imported = 0;
-
-    auto importTeamDir = [&](const std::filesystem::path& root) {
-        const std::string name = root.filename().string();
-        Team team{name, name, root, false}; // Origem: detectado automaticamente (Autorizado / false)
-        std::string validationReason;
-        if (isValidTeam(team, validationReason)) {
+    try {
+        const auto folder = baseDirectory_ / "teams";
+        if (!std::filesystem::is_directory(folder)) throw std::runtime_error("Configure uma pasta base com o diretório teams.");
+        int imported = 0;
+        for (auto team : discoverTeams(folder)) {
             const auto& existing = store_.teams();
-            const bool exists = std::any_of(existing.begin(), existing.end(), [&root](const Team& t) {
-                return t.root == root;
-            });
-            if (!exists) {
-                try {
-                    store_.add(std::move(team));
-                    imported++;
-                } catch(...) {}
-            }
+            if (std::any_of(existing.begin(), existing.end(), [&](const Team& item) { return item.root == team.root; })) continue;
+            store_.add(std::move(team));
+            ++imported;
         }
-    };
-
-    for (const auto& categoryEntry : std::filesystem::directory_iterator(teamsFolder)) {
-        if (!categoryEntry.is_directory()) continue;
-        
-        // No rcsssetup, a estrutura geralmente eh teams/<categoria>/<time> (ex: teams/rc2024/Helios)
-        for (const auto& teamEntry : std::filesystem::directory_iterator(categoryEntry.path())) {
-            if (!teamEntry.is_directory()) continue;
-            importTeamDir(teamEntry.path());
-        }
-    }
-
-    if (imported > 0) {
         refreshTeams();
-        report(wxString::Format("Importacao concluida: %d novo(s) time(s) importado(s).", imported));
-    } else {
-        report("Importacao concluida: Nenhum time novo ou valido encontrado.");
+        report(wxString::Format("Importação concluída: %d time(s) com inicializador executável.", imported));
+    } catch (const std::exception& error) {
+        report("Importação interrompida: " + wxString::FromUTF8(error.what()));
+        wxMessageBox(wxString::FromUTF8(error.what()), "Importar times", wxICON_ERROR);
     }
 }
 
 void MainFrame::onValidateTeam(wxCommandEvent&) {
     const long selection = teamList_->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
-    if (selection == -1) { report("Validacao nao executada: nenhum time selecionado."); wxMessageBox("Selecione um time.", "Validar time", wxICON_INFORMATION); return; }
-    
-    if (static_cast<std::size_t>(selection) >= store_.teams().size()) return;
-    
+    if (selection == -1) { report("Selecione um time na lista para validar."); return; }
     const auto& team = store_.teams().at(static_cast<std::size_t>(selection));
-    
-    std::string validationReason;
-    const bool valid = isValidTeam(team, validationReason);
-    const wxString reason = wxString::FromUTF8(validationReason);
-
-    if (valid) {
-        const bool hasStartSh = std::filesystem::exists(team.root / "start.sh");
-        const bool hasStart = std::filesystem::exists(team.root / "start");
-        const bool hasStartTeam = std::filesystem::exists(team.root / "start_team");
-        
-        if (!hasStartSh && !hasStart && !hasStartTeam) {
-            int answer = wxMessageBox(
-                "O time foi encontrado, mas nao possui um script de inicializacao padrao (start.sh, start, ou start_team) exigido pelo rcsssetup.\n\n"
-                "Deseja criar um arquivo 'start.sh' generico agora?",
-                "Script ausente", wxYES_NO | wxICON_WARNING);
-            if (answer == wxYES) {
-                try {
-                    std::ofstream script(team.root / "start.sh");
-                    script << "#!/bin/bash\n"
-                           << "# Criado pelo UnBall-Manager2D\n\n"
-                           << "if [ -x \"./start\" ]; then\n"
-                           << "    ./start \"$@\"\n"
-                           << "else\n"
-                           << "    echo \"Por favor, substitua isso pelo comando de inicializacao do seu time!\"\n"
-                           << "    exit 1\n"
-                           << "fi\n";
-                    script.close();
-                    
-                    std::filesystem::permissions(team.root / "start.sh",
-                        std::filesystem::perms::owner_exec | std::filesystem::perms::group_exec | std::filesystem::perms::others_exec,
-                        std::filesystem::perm_options::add);
-                    
-                    wxMessageBox("Arquivo 'start.sh' criado com sucesso na pasta do time!", "Sucesso", wxICON_INFORMATION);
-                    report("Script start.sh gerado para o time " + wxString::FromUTF8(team.displayName) + ".");
-                    return;
-                } catch (const std::exception& e) {
-                    wxMessageBox("Nao foi possivel criar o arquivo: " + wxString::FromUTF8(e.what()), "Erro", wxICON_ERROR);
-                    return;
-                }
-            }
-        }
-    }
-    
-    report(valid ? "Validacao concluida: " + reason : "Validacao encontrou um problema: " + reason);
-    wxMessageBox((valid ? "Valido: " : "Invalido: ") + reason, "Validar time", wxICON_INFORMATION);
+    std::string reason;
+    const bool validRoot = isValidTeam(team, reason);
+    const auto launcher = validRoot ? findTeamLauncher(team.root) : std::filesystem::path{};
+    const wxString message = !validRoot ? wxString::FromUTF8(reason) : launcher.empty()
+        ? "Não foi encontrado um inicializador executável. Selecione a pasta que contém start.sh, start ou o diretório bin do time."
+        : "Inicializador encontrado: " + pathString(launcher);
+    report(message);
+    wxMessageBox(message, "Validar time", launcher.empty() ? wxICON_WARNING : wxICON_INFORMATION);
 }
 
 void MainFrame::onValidateAllTeams(wxCommandEvent&) {
-    if (store_.teams().empty()) {
-        wxMessageBox("A lista de times esta vazia.", "Validar todos", wxICON_INFORMATION);
-        return;
-    }
-
-    std::vector<const Team*> missingScriptTeams;
-    int invalidCount = 0;
-    int validCount = 0;
-
+    wxString summary;
+    unsigned ready = 0;
     for (const auto& team : store_.teams()) {
-        std::string validationReason;
-        if (!isValidTeam(team, validationReason)) {
-            invalidCount++;
-            continue;
-        }
-        
-        const bool hasStartSh = std::filesystem::exists(team.root / "start.sh");
-        const bool hasStart = std::filesystem::exists(team.root / "start");
-        const bool hasStartTeam = std::filesystem::exists(team.root / "start_team");
-        
-        if (!hasStartSh && !hasStart && !hasStartTeam) {
-            missingScriptTeams.push_back(&team);
-        } else {
-            validCount++;
-        }
+        const bool valid = !findTeamLauncher(team.root).empty();
+        ready += valid ? 1 : 0;
+        summary += wxString::FromUTF8(team.displayName) + (valid ? ": pronto\n" : ": inicializador executável ausente\n");
     }
-
-    wxString summary = wxString::Format("Resumo da validacao:\n- %d time(s) totalmente valido(s)\n", validCount);
-    if (invalidCount > 0) summary += wxString::Format("- %d time(s) com pasta invalida\n", invalidCount);
-    if (!missingScriptTeams.empty()) summary += wxString::Format("- %zu time(s) sem script start.sh\n", missingScriptTeams.size());
-
-    if (missingScriptTeams.empty()) {
-        wxMessageBox(summary, "Validar todos", wxICON_INFORMATION);
-        report("Validacao de todos os times concluida. Todos possuem scripts de inicializacao.");
-        return;
-    }
-
-    summary += "\nOs seguintes times precisam de um script 'start.sh':\n";
-    for (size_t i = 0; i < std::min(missingScriptTeams.size(), size_t(5)); ++i) {
-        summary += "- " + wxString::FromUTF8(missingScriptTeams[i]->displayName) + "\n";
-    }
-    if (missingScriptTeams.size() > 5) {
-        summary += wxString::Format("... e mais %zu time(s).\n", missingScriptTeams.size() - 5);
-    }
-    summary += "\nDeseja criar scripts genéricos para todos eles agora?";
-
-    int answer = wxMessageBox(summary, "Validacao concluida com pendencias", wxYES_NO | wxICON_WARNING);
-    
-    if (answer == wxYES) {
-        int fixedCount = 0;
-        for (const Team* team : missingScriptTeams) {
-            try {
-                std::ofstream script(team->root / "start.sh");
-                script << "#!/bin/bash\n"
-                       << "# Criado pelo UnBall-Manager2D\n\n"
-                       << "if [ -x \"./start\" ]; then\n"
-                       << "    ./start \"$@\"\n"
-                       << "else\n"
-                       << "    echo \"Por favor, substitua isso pelo comando de inicializacao do seu time!\"\n"
-                       << "    exit 1\n"
-                       << "fi\n";
-                script.close();
-                
-                std::filesystem::permissions(team->root / "start.sh",
-                    std::filesystem::perms::owner_exec | std::filesystem::perms::group_exec | std::filesystem::perms::others_exec,
-                    std::filesystem::perm_options::add);
-                
-                fixedCount++;
-            } catch (...) {}
-        }
-        wxMessageBox(wxString::Format("Scripts criados para %d time(s).", fixedCount), "Sucesso", wxICON_INFORMATION);
-        report(wxString::Format("Scripts start.sh gerados para %d time(s).", fixedCount));
-    }
+    if (summary.empty()) summary = "Adicione ou importe um time para começar.";
+    report(wxString::Format("Validação: %u de %zu times prontos. Nenhum arquivo de time foi alterado.", ready, store_.teams().size()));
+    wxMessageBox(summary, "Validar times", wxICON_INFORMATION);
 }
 
 void MainFrame::onRemoveTeam(wxCommandEvent&) {
@@ -576,119 +559,93 @@ void MainFrame::onRemoveTeam(wxCommandEvent&) {
     }
 }
 
-std::filesystem::path MainFrame::createRunDirectory() const {
-    const auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-    std::tm local{};
-#ifdef _WIN32
-    localtime_s(&local, &now);
-#else
-    localtime_r(&now, &local);
-#endif
-    std::ostringstream name;
-    name << std::put_time(&local, "%Y-%m-%d_%H-%M-%S");
-    const auto run = baseDirectory_ / "runs" / "UnBall-Manager2D" / name.str();
-    std::filesystem::create_directories(run);
-    return run;
+long MainFrame::launchProcess(const std::vector<std::string>& arguments, ProcessRole role,
+                              const std::filesystem::path& directory,
+                              const std::map<std::string, std::string>& environment) {
+    auto child = std::make_unique<ChildProcess>(arguments, directory, environment);
+    const auto pid = child->pid();
+    processes_.push_back({std::move(child), {}, role});
+    outputTimer_.Start(100);
+    return pid;
 }
 
 void MainFrame::startMonitorIfAvailable() {
-    if (monitorExecutable_.empty()) {
-        report("Aviso: rcssmonitor nao foi configurado.");
-        return;
+    if (monitorExecutable_.empty()) return;
+    try {
+        launchProcess({monitorExecutable_.string()}, ProcessRole::Monitor);
+    } catch (const std::exception& error) {
+        report("Partida mantida sem monitor: " + wxString::FromUTF8(error.what()));
     }
-    if (!std::filesystem::is_regular_file(monitorExecutable_)) {
-        report("Aviso: o caminho do rcssmonitor nao e valido.");
-        return;
-    }
-
-    auto monitor = std::make_unique<wxProcess>(this);
-    const long pid = wxExecute(shellQuote(monitorExecutable_), wxEXEC_ASYNC | wxEXEC_MAKE_GROUP_LEADER, monitor.get());
-    if (pid == 0) {
-        report("Aviso: nao foi possivel iniciar o rcssmonitor.");
-        return;
-    }
-
-    processes_.push_back(std::move(monitor));
-    report(wxString::Format("rcssmonitor iniciado (PID %ld).", pid));
 }
 
 void MainFrame::stopManagedProcesses() {
-    for (const auto& process : processes_) {
-        if (process && process->GetPid() > 0) {
-            // Em Unix, para garantir que bash e todos os filhos (python, rcssserver, times) 
-            // morram juntos, enviamos SIGKILL pro grupo de processos.
-            wxExecute(wxString::Format("kill -9 -%ld", process->GetPid()), wxEXEC_SYNC);
-            wxProcess::Kill(process->GetPid(), wxSIGKILL, wxKILL_CHILDREN);
-        }
+    if (sessionPid_ != 0) stopRequested_ = true;
+    for (auto& entry : processes_) entry.process->stop();
+    stopping_ = !processes_.empty();
+    updateSessionState();
+}
+
+void MainFrame::launchSession(const Team* left, const Team* right) {
+    if (closing_) return;
+    if (sessionPid_ != 0 || stopping_) { report("Encerre a sessão atual antes de iniciar outra."); return; }
+    try {
+        if (!std::filesystem::is_directory(baseDirectory_)) throw std::runtime_error("Escolha uma pasta base válida na aba Configuração.");
+        if (!std::filesystem::is_regular_file(serverExecutable_) || ::access(serverExecutable_.c_str(), X_OK) != 0)
+            throw std::runtime_error("Escolha um rcssserver executável na aba Configuração.");
+        activeSession_ = prepareSession(baseDirectory_, left && coachModeCheck_->GetValue(), left, right);
+        sessionLog_.open(activeSession_.runtime / "console.log", std::ios::binary);
+        if (!sessionLog_) throw std::runtime_error("Não foi possível gravar a saída da sessão.");
+        sessionPid_ = launchProcess({std::filesystem::absolute(serverExecutable_).string(), "include=config/session.conf"}, ProcessRole::Session,
+                                   activeSession_.runtime, {{"RCSS_CONF_DIR", activeSession_.configuration.string()}});
+        stopRequested_ = false;
+        if (left) rememberMatch();
+        try {
+            writeTextAtomically(sessionRuntimeDirectory(activeSession_.directory) / "session-state.json",
+                nlohmann::json{{"active", true}, {"pid", sessionPid_}, {"stop_requested", false}}.dump());
+        } catch (const std::exception& error) { report("Aviso ao registrar estado da sessão: " + wxString::FromUTF8(error.what())); }
+        refreshDataSessions();
+        stopping_ = false;
+        report("Servidor iniciado. Logs da sessão: " + pathString(activeSession_.logs));
+        startMonitorIfAvailable();
+        updateSessionState();
+    } catch (const std::exception& error) {
+        sessionLog_.close(); sessionLog_.clear();
+        report("Sessão não iniciada: " + wxString::FromUTF8(error.what()));
+        wxMessageBox(wxString::FromUTF8(error.what()), "Iniciar sessão", wxICON_ERROR);
     }
 }
 
 void MainFrame::onPrepareMatch(wxCommandEvent&) {
     const int left = leftTeam_->GetSelection(), right = rightTeam_->GetSelection();
-    report("Preparando partida via auto_match.py...");
-    if (left == wxNOT_FOUND || right == wxNOT_FOUND || left == right) { report("Sessao nao criada: selecione dois times diferentes."); wxMessageBox("Selecione dois times diferentes.", "Nova partida", wxICON_WARNING); return; }
-    if (autoMatchScript_.empty() || !std::filesystem::is_regular_file(autoMatchScript_)) { report("Partida nao iniciada: configure o caminho de auto_match.py."); wxMessageBox("Configure o caminho de auto_match.py na aba Configuracao.", "Nova partida", wxICON_ERROR); return; }
-    if (!std::filesystem::is_directory(baseDirectory_)) { report("Partida nao iniciada: configure a pasta base do RoboCup."); wxMessageBox("Configure a pasta base do RoboCup.", "Nova partida", wxICON_ERROR); return; }
-    const auto& a = store_.teams().at(static_cast<std::size_t>(left));
-    const auto& b = store_.teams().at(static_cast<std::size_t>(right));
-    const auto run = createRunDirectory();
-    std::ofstream summary(run / "match.json");
-    if (!summary) {
-        report("Partida nao iniciada: nao foi possivel criar o resumo da sessao.");
-        wxMessageBox("Nao foi possivel criar a pasta da sessao.", "Nova partida", wxICON_ERROR);
-        return;
+    if (left == wxNOT_FOUND || right == wxNOT_FOUND || left == right) {
+        report("Escolha dois times diferentes para iniciar a partida."); return;
     }
-    const nlohmann::json matchSummary{
-        {"leftTeam", a.teamName},
-        {"rightTeam", b.teamName},
-        {"protectedTeams", true},
-    };
-    summary << matchSummary.dump(2) << '\n';
-    const auto base = baseDirectory_;
-    const wxString command = "python3 " + shellQuote(autoMatchScript_) + " -d " + shellQuote(base)
-        + " -l " + shellQuote(a.teamName) + " -r " + shellQuote(b.teamName) + " -n 1";
-    
-    const wxString coachVal = coachModeCheck_->GetValue() ? "1" : "0";
-    const wxString configCmd = "mkdir -p ~/.rcssserver && touch ~/.rcssserver/server.conf && "
-        "sed -i 's/^coach *:.*/coach : " + coachVal + "/' ~/.rcssserver/server.conf && "
-        "sed -i 's/^coach_w_referee *:.*/coach_w_referee : " + coachVal + "/' ~/.rcssserver/server.conf";
-    
-    const wxString shellCommand = "bash -c " + shellQuote(wxString(configCmd + " && cd " + shellQuote(base) + " && " + command).ToStdString());
-    report("Comando da partida: " + shellCommand);
-    report("Logs esperados em: " + pathString(base / "log_analysis" / "log"));
-    
-    auto process = std::make_unique<wxProcess>(this);
-    process->Redirect();
-    const long pid = wxExecute(shellCommand, wxEXEC_ASYNC | wxEXEC_MAKE_GROUP_LEADER, process.get());
-    if (pid == 0) { report("Partida nao iniciou: o auto_match.py nao pode ser executado."); wxMessageBox("Nao foi possivel iniciar auto_match.py.", "Nova partida", wxICON_ERROR); return; }
-    processes_.push_back(std::move(process));
-    outputTimer_.Start(250);
-    startMonitorIfAvailable();
-    report(wxString::Format("Partida iniciada pelo auto_match.py (PID %ld).", pid));
+    launchSession(&store_.teams().at(static_cast<std::size_t>(left)), &store_.teams().at(static_cast<std::size_t>(right)));
 }
 
 void MainFrame::onSaveEnvironment(wxCommandEvent&) {
-    baseDirectory_ = baseDirectoryField_->GetValue().ToStdString();
-    serverExecutable_ = serverField_->GetValue().ToStdString();
-    monitorExecutable_ = monitorField_->GetValue().ToStdString();
-    autoMatchScript_ = autoMatchField_->GetValue().ToStdString();
-
-    if (!std::filesystem::is_directory(baseDirectory_) ||
-        !std::filesystem::is_regular_file(serverExecutable_) ||
-        !std::filesystem::is_regular_file(autoMatchScript_)) {
-        wxMessageBox("Informe uma pasta base, o rcssserver e o auto_match.py validos.",
-            "Configuracao", wxICON_WARNING);
-        return;
+    try {
+        const std::filesystem::path base = baseDirectoryField_->GetValue().ToStdString();
+        const std::filesystem::path server = serverField_->GetValue().ToStdString();
+        const std::filesystem::path monitor = monitorField_->GetValue().ToStdString();
+        const std::filesystem::path script = autoMatchField_->GetValue().ToStdString();
+        if (!std::filesystem::is_directory(base)) throw std::runtime_error("Escolha uma pasta base existente.");
+        if (!std::filesystem::is_regular_file(server) || ::access(server.c_str(), X_OK) != 0)
+            throw std::runtime_error("Escolha um rcssserver executável.");
+        if (!monitor.empty() && (!std::filesystem::is_regular_file(monitor) || ::access(monitor.c_str(), X_OK) != 0))
+            throw std::runtime_error("Escolha um monitor executável ou deixe o campo vazio.");
+        if (!script.empty() && !std::filesystem::is_regular_file(script))
+            throw std::runtime_error("O auto_match.py é opcional. Corrija o caminho ou deixe o campo vazio.");
+        writeTextAtomically(appData_ / "environment.json", nlohmann::json{
+            {"baseDirectory", base.string()}, {"serverExecutable", server.string()},
+            {"monitorExecutable", monitor.string()}, {"autoMatchScript", script.string()}}.dump(2) + '\n');
+        baseDirectory_ = base; serverExecutable_ = server; monitorExecutable_ = monitor; autoMatchScript_ = script;
+        updateEnvironmentStatus(); refreshReplays(); refreshDataSessions();
+        report("Configuração salva.");
+    } catch (const std::exception& error) {
+        report("Configuração não salva: " + wxString::FromUTF8(error.what()));
+        wxMessageBox(wxString::FromUTF8(error.what()), "Configuração", wxICON_WARNING);
     }
-    if (!monitorExecutable_.empty() && !std::filesystem::is_regular_file(monitorExecutable_)) {
-        wxMessageBox("O caminho do rcssmonitor e invalido.", "Configuracao", wxICON_WARNING);
-        return;
-    }
-
-    saveEnvironment();
-    updateEnvironmentStatus();
-    refreshReplays();
-    report("Configuracao de ferramentas salva.");
 }
 
 void MainFrame::onChooseBaseDirectory(wxCommandEvent&) {
@@ -711,60 +668,86 @@ void MainFrame::onChooseAutoMatch(wxCommandEvent&) {
     if (!path.empty()) autoMatchField_->SetValue(path);
 }
 
-void MainFrame::onStartServer(wxCommandEvent&) {
-    if (!std::filesystem::is_regular_file(serverExecutable_)) {
-        report("Servidor nao iniciado: rcssserver nao configurado.");
-        wxMessageBox("Configure o caminho do rcssserver na aba Configuracao.", "Servidor", wxICON_ERROR);
-        return;
-    }
-    report("Iniciando rcssserver...");
-    
-    auto process = std::make_unique<wxProcess>(this);
-    process->Redirect();
-    const long pid = wxExecute(shellQuote(serverExecutable_), wxEXEC_ASYNC, process.get());
-    if (pid == 0) { report("Servidor nao iniciou. Consulte o ambiente e os logs."); wxMessageBox("Nao foi possivel iniciar o rcssserver.", "Servidor", wxICON_ERROR); return; }
-    processes_.push_back(std::move(process));
-    startMonitorIfAvailable();
-    report(wxString::Format("rcssserver iniciado (PID %ld). Aguardando conexoes dos times.", pid));
-}
+void MainFrame::onStartServer(wxCommandEvent&) { launchSession(); }
 
 void MainFrame::onStopAll(wxCommandEvent&) {
-    if (!processes_.empty()) {
-        stopManagedProcesses();
-        report("Encerramento solicitado para os processos iniciados por esta sessao.");
-    }
-    else report("Nao ha processos iniciados pelo UnBall-Manager2D para encerrar.");
+    stopManagedProcesses();
+    report(processes_.empty() ? "Nenhuma sessão para encerrar." : "Encerramento solicitado. Aguardando os logs…");
 }
 
-void MainFrame::onProcessTerminated(wxProcessEvent& event) {
-    report(wxString::Format("Processo %ld terminou com codigo %d.",
-        static_cast<long>(event.GetPid()), static_cast<int>(event.GetExitCode())));
-    std::erase_if(processes_, [&event](const std::unique_ptr<wxProcess>& process) {
-        return process && process->GetPid() == event.GetPid();
-    });
-    if (processes_.empty()) outputTimer_.Stop();
+void MainFrame::onOpenSessionDirectory(wxCommandEvent&) {
+    if (!activeSession_.directory.empty() && !wxLaunchDefaultApplication(pathString(activeSession_.directory)))
+        report("Não foi possível abrir a pasta: " + pathString(activeSession_.directory));
+}
+
+void MainFrame::onClose(wxCloseEvent& event) {
+    if ((!processes_.empty() || exporter_->busy()) && event.CanVeto()) {
+        closing_ = true;
+        stopManagedProcesses();
+        outputTimer_.Start(100);
+        report("Encerrando a sessão e aguardando a extração dos dados…");
+        event.Veto();
+        return;
+    }
+    event.Skip();
 }
 
 void MainFrame::onPollProcessOutput(wxTimerEvent&) {
-    for (const auto& process : processes_) {
-        if (!process) continue;
-        auto readStream = [this](wxInputStream* stream) {
-            char buffer[512];
-            while (stream && stream->CanRead()) {
-                stream->Read(buffer, sizeof(buffer) - 1);
-                const auto count = stream->LastRead();
-                if (count == 0) break;
-                buffer[count] = '\0';
-                appendEvent(wxString::FromUTF8(buffer));
+    bool sessionEnded = false;
+    for (auto& entry : processes_) {
+        const auto output = entry.process->poll();
+        if (entry.role == ProcessRole::Session && sessionLog_.is_open()) {
+            sessionLog_ << output; sessionLog_.flush();
+        }
+        entry.pendingOutput += output;
+        std::size_t end;
+        while ((end = entry.pendingOutput.find('\n')) != std::string::npos) {
+            auto line = entry.pendingOutput.substr(0, end);
+            auto text = wxString::FromUTF8(line);
+            if (text.empty() && !line.empty()) text = wxString::From8BitData(line.data(), line.size());
+            appendEvent(text);
+            entry.pendingOutput.erase(0, end + 1);
+        }
+        if (entry.pendingOutput.size() > 16384 || entry.process->finished()) {
+            if (!entry.pendingOutput.empty()) appendEvent(wxString::FromUTF8(entry.pendingOutput));
+            entry.pendingOutput.clear();
+        }
+        if (entry.process->finished()) {
+            report(wxString::Format("Processo %d encerrado (código %d).", entry.process->pid(), entry.process->exitCode().value_or(-1)));
+            if (entry.role == ProcessRole::Session) {
+                sessionPid_ = 0; sessionEnded = true;
+                sessionLog_.close(); sessionLog_.clear();
             }
-        };
-        if (process->IsInputAvailable()) readStream(process->GetInputStream());
-        if (process->IsErrorAvailable()) readStream(process->GetErrorStream());
+        }
     }
+    if (sessionEnded) {
+        markSessionEnded(stopRequested_);
+        try { exporter_->enqueue(activeSession_.directory); }
+        catch (const std::exception& error) { report("Extração não agendada: " + wxString::FromUTF8(error.what())); }
+        stopping_ = true;
+        for (auto& entry : processes_) if (entry.role == ProcessRole::Monitor) entry.process->stop();
+        refreshReplays();
+    }
+    std::erase_if(processes_, [](const ProcessEntry& entry) { return entry.process->finished(); });
+    if (sessionPid_ == 0 && !stopRequested_) {
+        stopping_ = std::any_of(processes_.begin(), processes_.end(), [](const ProcessEntry& entry) { return entry.role == ProcessRole::Monitor; });
+    }
+    const bool exportChanged = exporter_->poll();
+    if (exportChanged) { report(wxString::FromUTF8(exporter_->message())); refreshDataSessions(); }
+    if (sessionEnded) refreshDataSessions();
+    if (processes_.empty()) {
+        stopping_ = false;
+        if (!exporter_->busy()) outputTimer_.Stop();
+        if (closing_ && !exporter_->busy()) { Destroy(); return; }
+    }
+    updateSessionState();
 }
 
 void MainFrame::appendEvent(const wxString& text) {
-    if (events_) events_->AppendText(text + "\n");
+    if (!events_) return;
+    constexpr long maximumLogLength = 200000;
+    if (events_->GetLastPosition() > maximumLogLength) events_->Remove(0, events_->GetLastPosition() - maximumLogLength / 2);
+    events_->AppendText(text + "\n");
 }
 
 void MainFrame::report(const wxString& text) {
@@ -777,28 +760,8 @@ void MainFrame::refreshReplays() {
     replayList_->DeleteAllItems();
     currentReplays_.clear();
 
-    const std::vector<std::filesystem::path> searchPaths = {
-        baseDirectory_ / "log_analysis" / "log",
-        baseDirectory_ / "log"
-    };
-
-    std::vector<std::filesystem::path> foundFiles;
-    for (const auto& path : searchPaths) {
-        if (std::filesystem::is_directory(path)) {
-            for (const auto& entry : std::filesystem::directory_iterator(path)) {
-                if (entry.is_regular_file() && (entry.path().extension() == ".rcg" || entry.path().extension() == ".gz")) {
-                    foundFiles.push_back(entry.path());
-                }
-            }
-        }
-    }
-    // Ordenar do mais recente para o mais antigo
-    std::sort(foundFiles.begin(), foundFiles.end(), [](const std::filesystem::path& a, const std::filesystem::path& b) {
-        try { return std::filesystem::last_write_time(a) > std::filesystem::last_write_time(b); }
-        catch(...) { return false; }
-    });
-
-    currentReplays_ = std::move(foundFiles);
+    try { currentReplays_ = findReplays(baseDirectory_); }
+    catch (const std::exception& error) { report("Replays indisponíveis: " + wxString::FromUTF8(error.what())); }
     long row = 0;
     for (const auto& logFile : currentReplays_) {
         std::string dateStr = "Desconhecido";
@@ -819,7 +782,7 @@ void MainFrame::refreshReplays() {
         } catch(...) {}
 
         replayList_->InsertItem(row, wxString::FromUTF8(dateStr));
-        replayList_->SetItem(row, 1, pathString(logFile.filename()));
+        replayList_->SetItem(row, 1, pathString(logFile.lexically_relative(baseDirectory_)));
         ++row;
     }
     if (!currentReplays_.empty()) replayList_->SetItemState(0, wxLIST_STATE_SELECTED | wxLIST_STATE_FOCUSED, wxLIST_STATE_SELECTED | wxLIST_STATE_FOCUSED);
@@ -831,50 +794,212 @@ void MainFrame::onRefreshReplays(wxCommandEvent&) {
         static_cast<unsigned long>(currentReplays_.size())));
 }
 
+
+void MainFrame::watchReplay(const std::filesystem::path& path) {
+    try {
+        if (!std::filesystem::is_regular_file(path)) throw std::runtime_error("O replay não foi encontrado. Atualize a lista.");
+        launchProcess({monitorExecutable_.string(), std::filesystem::absolute(path).string()}, ProcessRole::Replay);
+        report("Replay aberto: " + pathString(path.filename()));
+        updateSessionState();
+    } catch (const std::exception& error) {
+        report("Replay não aberto: " + wxString::FromUTF8(error.what()));
+        wxMessageBox(wxString::FromUTF8(error.what()), "Abrir replay", wxICON_ERROR);
+    }
+}
+
 void MainFrame::onWatchSelectedReplay(wxCommandEvent&) {
     const long selection = replayList_->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
     if (selection == -1 || static_cast<std::size_t>(selection) >= currentReplays_.size()) {
-        wxMessageBox("Selecione um replay na lista.", "Assistir Replay", wxICON_INFORMATION);
-        return;
+        report("Selecione um replay na lista."); return;
     }
-    const auto logPath = currentReplays_.at(static_cast<std::size_t>(selection));
-    
-    if (monitorExecutable_.empty() || !std::filesystem::is_regular_file(monitorExecutable_)) {
-        wxMessageBox("Configure o caminho do rcssmonitor na aba Configuracao.", "Assistir Replay", wxICON_ERROR);
-        return;
-    }
-    
-    report("Iniciando reproducao de log: " + pathString(logPath.filename()));
-    const wxString shellCommand = shellQuote(monitorExecutable_) + " " + shellQuote(logPath);
-    
-    auto process = std::make_unique<wxProcess>(this);
-    const long pid = wxExecute(shellCommand, wxEXEC_ASYNC | wxEXEC_MAKE_GROUP_LEADER, process.get());
-    if (pid == 0) {
-        wxMessageBox("Nao foi possivel iniciar o rcssmonitor.", "Assistir Replay", wxICON_ERROR);
-        return;
-    }
-    processes_.push_back(std::move(process));
-    report(wxString::Format("rcssmonitor reproduzindo log (PID %ld).", pid));
+    watchReplay(currentReplays_.at(static_cast<std::size_t>(selection)));
 }
 
 void MainFrame::onWatchManualReplay(wxCommandEvent&) {
-    const wxString path = chooseFile(this, pathString(baseDirectory_), "Selecione o arquivo de log (.rcg)", "Logs do RoboCup (*.rcg;*.rcg.gz)|*.rcg;*.rcg.gz|Todos os arquivos (*)|*");
-    if (path.empty()) return;
-    
-    if (monitorExecutable_.empty() || !std::filesystem::is_regular_file(monitorExecutable_)) {
-        wxMessageBox("Configure o caminho do rcssmonitor na aba Configuracao.", "Assistir Replay", wxICON_ERROR);
-        return;
+    const auto path = chooseFile(this, pathString(baseDirectory_), "Escolha um replay", "Replays (*.rcg;*.rcg.gz)|*.rcg;*.rcg.gz");
+    if (!path.empty()) watchReplay(std::filesystem::path(path.ToStdString()));
+}
+
+void MainFrame::markSessionEnded(bool stopRequested) {
+    try {
+        writeTextAtomically(sessionRuntimeDirectory(activeSession_.directory) / "session-state.json",
+            nlohmann::json{{"active", false}, {"stop_requested", stopRequested}}.dump());
+    } catch (const std::exception& error) { report("Estado da sessão não salvo: " + wxString::FromUTF8(error.what())); }
+}
+
+void MainFrame::refreshDataSessions() {
+    try { allDataSessions_ = findDataSessions(baseDirectory_); filterDataSessions(); }
+    catch (const std::exception& error) { report("Histórico indisponível: " + wxString::FromUTF8(error.what())); }
+}
+
+void MainFrame::filterDataSessions() {
+    std::filesystem::path previous;
+    const long selected = dataList_->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
+    if (selected >= 0 && static_cast<std::size_t>(selected) < dataSessions_.size())
+        previous = dataSessions_.at(static_cast<std::size_t>(selected)).directory;
+    const auto search = historySearch_->GetValue().Lower();
+    const int filter = historyFilter_->GetSelection();
+    dataList_->Freeze();
+    dataList_->DeleteAllItems();
+    dataSessions_.clear();
+    for (const auto& session : allDataSessions_) {
+        const auto text = wxString::FromUTF8(session.label + " " + session.createdAt + " " + session.directory.filename().string()).Lower();
+        if (!search.empty() && !text.Contains(search)) continue;
+        if (filter == 1 && session.exportDirectory.empty()) continue;
+        if (filter == 2 && session.status != "failed" && session.status != "completed_with_warnings" && !((session.status == "queued" || session.status == "extracting") && !exporter_->contains(session.directory))) continue;
+        if (filter == 3 && !session.exportDirectory.empty()) continue;
+        dataSessions_.push_back(session);
     }
-    
-    report("Iniciando reproducao de log: " + path);
-    const wxString shellCommand = shellQuote(monitorExecutable_) + " " + shellQuote(std::filesystem::path(path.ToStdString()));
-    
-    auto process = std::make_unique<wxProcess>(this);
-    const long pid = wxExecute(shellCommand, wxEXEC_ASYNC | wxEXEC_MAKE_GROUP_LEADER, process.get());
-    if (pid == 0) {
-        wxMessageBox("Nao foi possivel iniciar o rcssmonitor.", "Assistir Replay", wxICON_ERROR);
-        return;
+    long row = 0;
+    bool restored = false;
+    for (const auto& session : dataSessions_) {
+        wxString state = "Aguardando extração";
+        if (sessionPid_ != 0 && session.directory == std::filesystem::weakly_canonical(activeSession_.directory)) state = "Gravando logs";
+        else if (session.status == "queued") state = exporter_->contains(session.directory) ? "Na fila" : "Interrompida; reprocessar";
+        else if (session.status == "extracting") state = exporter_->contains(session.directory) ? "Extraindo" : "Interrompida; reprocessar";
+        else if (session.status == "completed") state = "Concluída";
+        else if (session.status == "completed_with_warnings") state = "Concluída com avisos";
+        else if (session.status == "failed") state = "Falhou; ver problemas";
+        auto date = session.createdAt.substr(0, 19);
+        std::replace(date.begin(), date.end(), 'T', ' ');
+        dataList_->InsertItem(row, wxString::FromUTF8(date));
+        dataList_->SetItem(row, 1, wxString::FromUTF8(session.label));
+        dataList_->SetItem(row, 2, state);
+        dataList_->SetItem(row, 3, wxString::FromUTF8(session.coverage));
+        if (session.directory == previous) {
+            dataList_->SetItemState(row, wxLIST_STATE_SELECTED | wxLIST_STATE_FOCUSED, wxLIST_STATE_SELECTED | wxLIST_STATE_FOCUSED);
+            restored = true;
+        }
+        ++row;
     }
-    processes_.push_back(std::move(process));
-    report(wxString::Format("rcssmonitor reproduzindo log manual (PID %ld).", pid));
+    if (!restored && !dataSessions_.empty()) dataList_->SetItemState(0, wxLIST_STATE_SELECTED | wxLIST_STATE_FOCUSED, wxLIST_STATE_SELECTED | wxLIST_STATE_FOCUSED);
+    dataList_->Thaw();
+    updateSessionState();
+    updateHistoryDetail();
+}
+
+void MainFrame::updateHistoryDetail() {
+    const long selected = dataList_->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
+    wxString text;
+    if (allDataSessions_.empty()) text = "Seu histórico está vazio. Inicie uma partida na aba Partida; os dados serão gerados ao terminar.";
+    else if (dataSessions_.empty()) text = "Nenhuma partida encontrada. Limpe a busca ou escolha outro filtro.";
+    else if (selected >= 0 && static_cast<std::size_t>(selected) < dataSessions_.size()) {
+        const auto& session = dataSessions_.at(static_cast<std::size_t>(selected));
+        text = wxString::Format("%zu partida(s) na lista. ", dataSessions_.size()) +
+            (session.exportDirectory.empty() ? "CSV ainda não disponível. " : "Duplo clique abre os CSVs. ") +
+            "\nLogs originais e versões anteriores ficam na pasta da partida.";
+        historyDetail_->SetToolTip(pathString(session.directory));
+    }
+    historyDetail_->SetLabel(text);
+    historyDetail_->Wrap(FromDIP(700));
+    historyDetail_->GetParent()->Layout();
+}
+
+void MainFrame::onReprocessData(wxCommandEvent&) {
+    const long selected = dataList_->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
+    if (selected < 0 || static_cast<std::size_t>(selected) >= dataSessions_.size() || closing_) return;
+    const auto directory = dataSessions_.at(static_cast<std::size_t>(selected)).directory;
+    if (sessionPid_ != 0 && directory == std::filesystem::weakly_canonical(activeSession_.directory)) {
+        report("Aguarde a sessão encerrar antes de extrair os dados."); return;
+    }
+    try {
+        if (exporter_->enqueue(directory)) {
+            outputTimer_.Start(100);
+            report("Extração agendada. Os logs e a última exportação válida serão preservados.");
+        }
+        refreshDataSessions();
+    } catch (const std::exception& error) { report("Extração não agendada: " + wxString::FromUTF8(error.what())); }
+}
+
+void MainFrame::onOpenData(wxCommandEvent&) {
+    const long selected = dataList_->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
+    if (selected < 0 || static_cast<std::size_t>(selected) >= dataSessions_.size()) return;
+    const auto& directory = dataSessions_.at(static_cast<std::size_t>(selected)).exportDirectory;
+    if (!directory.empty() && !wxLaunchDefaultApplication(pathString(csvDirectory(directory)))) report("Não foi possível abrir os CSVs: " + pathString(directory));
+}
+
+void MainFrame::onDataProblems(wxCommandEvent&) {
+    const long selected = dataList_->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
+    if (selected < 0 || static_cast<std::size_t>(selected) >= dataSessions_.size()) return;
+    const auto& session = dataSessions_.at(static_cast<std::size_t>(selected));
+    std::string text = session.detail;
+    if (!session.exportDirectory.empty()) {
+        text += "\nÚltima exportação válida: " + session.exportDirectory.string() + "\nCobertura: " + session.coverage + "\n\n";
+        std::ifstream quality(csvDirectory(session.exportDirectory) / "qualidade.csv");
+        // Preview is bounded; the complete file remains available in the export folder.
+        std::string line;
+        for (int count = 0; count < 100 && std::getline(quality, line); ++count) text += line + '\n';
+    }
+    if (text.empty()) text = "Ainda não há diagnóstico. Encerre a partida ou use Reprocessar dados. Consulte a aba Eventos em caso de falha.";
+    wxDialog dialog(this, wxID_ANY, "Problemas e cobertura da extração", wxDefaultPosition, FromDIP(wxSize(720, 440)), wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+    auto* sizer = new wxBoxSizer(wxVERTICAL);
+    auto* content = new wxTextCtrl(&dialog, wxID_ANY, wxString::FromUTF8(text), wxDefaultPosition, wxDefaultSize, wxTE_MULTILINE | wxTE_READONLY);
+    sizer->Add(content, 1, wxEXPAND | wxALL, 8);
+    sizer->Add(dialog.CreateStdDialogButtonSizer(wxOK), 0, wxEXPAND | wxALL, 8);
+    dialog.SetSizer(sizer);
+    dialog.ShowModal();
+}
+
+void MainFrame::onHistoryReplay(wxCommandEvent&) {
+    const long selected = dataList_->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
+    if (selected < 0 || static_cast<std::size_t>(selected) >= dataSessions_.size()) return;
+    const auto& session = dataSessions_.at(static_cast<std::size_t>(selected));
+    if (sessionPid_ != 0 && session.directory == std::filesystem::weakly_canonical(activeSession_.directory)) {
+        report("Aguarde a partida encerrar para abrir seu replay."); return;
+    }
+    const auto& replay = session.replay;
+    if (!replay.empty()) watchReplay(replay);
+    else report("Não há um replay único nesta sessão. Use a aba Replays antigos para escolher um arquivo.");
+}
+
+void MainFrame::onHistoryFolder(wxCommandEvent&) {
+    const long selected = dataList_->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
+    if (selected < 0 || static_cast<std::size_t>(selected) >= dataSessions_.size()) return;
+    const auto directory = dataSessions_.at(static_cast<std::size_t>(selected)).directory;
+    if (!wxLaunchDefaultApplication(pathString(directory))) report("Não foi possível abrir a pasta da partida.");
+}
+
+void MainFrame::onReuseTeams(wxCommandEvent&) {
+    const long selected = dataList_->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
+    if (selected < 0 || static_cast<std::size_t>(selected) >= dataSessions_.size() || sessionPid_ != 0 || stopping_ || closing_) return;
+    const auto& session = dataSessions_.at(static_cast<std::size_t>(selected));
+    int left = wxNOT_FOUND, right = wxNOT_FOUND;
+    for (std::size_t i = 0; i < store_.teams().size(); ++i) {
+        if (store_.teams()[i].root == session.leftRoot) left = static_cast<int>(i);
+        if (store_.teams()[i].root == session.rightRoot) right = static_cast<int>(i);
+    }
+    if (left == wxNOT_FOUND || right == wxNOT_FOUND || left == right) {
+        report("Cadastre novamente as pastas dos dois times na aba Times para usar este confronto."); return;
+    }
+    leftTeam_->SetSelection(left); rightTeam_->SetSelection(right);
+    notebook_->SetSelection(0);
+    FindWindow(controlId(ControlId::PrepareMatch))->SetFocus();
+    rememberMatch();
+    report("Times carregados. Use Iniciar partida ou Ctrl+Enter para jogar.");
+}
+
+void MainFrame::rememberMatch() {
+    const int left = leftTeam_->GetSelection(), right = rightTeam_->GetSelection();
+    if (left == wxNOT_FOUND || right == wxNOT_FOUND) return;
+    try {
+        writeTextAtomically(appData_ / "ui.json", nlohmann::json{
+            {"leftRoot", store_.teams().at(static_cast<std::size_t>(left)).root.string()},
+            {"rightRoot", store_.teams().at(static_cast<std::size_t>(right)).root.string()},
+            {"coach", coachModeCheck_->GetValue()}}.dump(2));
+    } catch (const std::exception& error) { report("Não foi possível lembrar os times: " + wxString::FromUTF8(error.what())); }
+}
+
+void MainFrame::restoreMatch() {
+    try {
+        const auto file = appData_ / "ui.json";
+        if (!std::filesystem::exists(file)) return;
+        std::ifstream input(file);
+        const auto settings = nlohmann::json::parse(input);
+        const std::filesystem::path left = settings.value("leftRoot", ""), right = settings.value("rightRoot", "");
+        for (std::size_t i = 0; i < store_.teams().size(); ++i) {
+            if (store_.teams()[i].root == left) leftTeam_->SetSelection(static_cast<int>(i));
+            if (store_.teams()[i].root == right) rightTeam_->SetSelection(static_cast<int>(i));
+        }
+        coachModeCheck_->SetValue(settings.value("coach", false));
+    } catch (const std::exception& error) { report("Preferências não carregadas: " + wxString::FromUTF8(error.what())); }
 }
