@@ -115,6 +115,9 @@ std::vector<DataSession> findDataSessions(const std::filesystem::path& base) {
             if (metadata.contains("leftTeam")) session.label = metadata.value("leftTeam", "") + " × " + metadata.value("rightTeam", "");
             else if (metadata.contains("coach")) session.label = "Somente servidor";
             session.createdAt = metadata.value("created_at", session.createdAt);
+            session.batchId = metadata.value("batch_id", "");
+            session.batchIndex = metadata.value("batch_index", 0);
+            session.batchTotal = metadata.value("batch_total", 0);
             session.leftRoot = metadata.value("leftDirectory", "");
             session.rightRoot = metadata.value("rightDirectory", "");
             const auto logDirectory = entry.path() / "logs";

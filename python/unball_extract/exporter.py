@@ -371,7 +371,7 @@ class Reader:
         for side, field in (('l', 'leftTeam'), ('r', 'rightTeam')):
             if self.names[side] and metadata.get(field) and self.names[side] != metadata[field]:
                 self.tables.warn('nome_diferente_cadastro', f'{side}: cadastro={metadata[field]}, anunciado={self.names[side]}')
-        self.tables.write('partida', time_l=self.names['l'], time_r=self.names['r'],
+        self.tables.write('partida', batch_id=metadata.get('batch_id'), batch_index=metadata.get('batch_index'), batch_total=metadata.get('batch_total'), time_l=self.names['l'], time_r=self.names['r'],
             time_selecionado_l=metadata.get('leftTeam'), time_selecionado_r=metadata.get('rightTeam'),
             gols_l=self.score[0], gols_r=self.score[1], ciclo_inicial=self.first, ciclo_final=self.last,
             ciclos_registrados=self.cycle_count if has_rcg else None, quadros=self.frames if has_rcg else None,
@@ -451,7 +451,7 @@ def _export_locked(session, exports, lifecycle):
             raise ExportError('As fontes mudaram durante a extração; tente novamente após encerrar a sessão')
         if tables.counts['bola'] != reader.frames or tables.counts['resumo_jogadores'] != len(reader.players):
             raise ExportError('Falha na conservação de linhas exportadas')
-        manifest = dict(layout_version=2, schema_version='1.0', extractor_version=__version__, session_id=session.name,
+        manifest = dict(layout_version=2, schema_version='1.1', extractor_version=__version__, session_id=session.name,
             generated_at=datetime.now(timezone.utc).isoformat(), sources=fingerprints,
             formats={'rcg': 'ULG6' if 'rcg' in selected else None, 'rcl': 'Recv ciclo,subciclo' if 'rcl' in selected else None},
             selected_sources={kind: str(path.relative_to(session)) for kind, path in selected.items()},

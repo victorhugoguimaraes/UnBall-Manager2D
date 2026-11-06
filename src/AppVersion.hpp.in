@@ -1,0 +1,2 @@
+#pragma once
+inline constexpr char unballSourceRevision[] = "@UNBALL_BUILD_REVISION@";

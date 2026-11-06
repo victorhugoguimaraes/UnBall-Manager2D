@@ -1,7 +1,12 @@
 #include "MainFrame.hpp"
+#include "Branding.hpp"
+#include <wx/statbmp.h>
+#include <wx/scrolwin.h>
 
 #include <wx/button.h>
 #include <wx/accel.h>
+#include <wx/spinctrl.h>
+#include <wx/gauge.h>
 #include <wx/srchctrl.h>
 #include <wx/choice.h>
 #include <wx/combobox.h>
@@ -66,6 +71,10 @@ enum class ControlId : int {
     ReuseTeams,
     GoHistory,
     GoEvents,
+    OpenBatchDirectory,
+    UpdateApplication,
+    RestartApplication,
+    UpdateLog,
 };
 
 constexpr int controlId(ControlId id) { return static_cast<int>(id); }
@@ -145,6 +154,12 @@ MainFrame::MainFrame()
     if (!std::filesystem::is_directory(extractorDirectory / "unball_extract"))
         extractorDirectory = executableDirectory.parent_path() / "share/unball-manager/extractor";
     exporter_ = std::make_unique<DataExport>("python3", extractorDirectory);
+    auto updaterScript = executableDirectory / "updater/unball_update.py";
+    if (!std::filesystem::is_regular_file(updaterScript)) updaterScript = executableDirectory.parent_path() / "share/unball-manager/updater/unball_update.py";
+    updater_ = std::make_unique<AppUpdate>(appData_, updaterScript);
+    restartTarget_ = installedUpdate(appData_);
+    if (!restartTarget_.empty() && std::filesystem::weakly_canonical(restartTarget_) == std::filesystem::weakly_canonical(executableDirectory / "UnBall-Manager2D")) restartTarget_.clear();
+    setUnballWindowIcon(*this);
     loadEnvironment();
     buildUi();
     refreshTeams();
@@ -163,7 +178,8 @@ void MainFrame::buildUi() {
     auto* notebook = new wxNotebook(this, wxID_ANY);
     notebook_ = notebook;
 
-    auto* configuration = new wxPanel(notebook);
+    auto* configuration = new wxScrolledWindow(notebook);
+    configuration->SetScrollRate(0, FromDIP(10));
     auto* configurationSizer = new wxFlexGridSizer(3, 8, 8);
     configurationSizer->Add(new wxStaticText(configuration, wxID_ANY, "Pasta base do RoboCup:"), 0, wxALIGN_CENTER_VERTICAL);
     baseDirectoryField_ = new wxTextCtrl(configuration, wxID_ANY, pathString(baseDirectory_));
@@ -194,6 +210,23 @@ void MainFrame::buildUi() {
     environment_ = new wxStaticText(configuration, wxID_ANY, "Verificando ambiente...");
     configurationOuter->Add(environment_, 0, wxALL, 12);
     addButton(configuration, configurationOuter, "Iniciar somente servidor", ControlId::StartServer);
+    configurationOuter->Add(new wxStaticText(configuration, wxID_ANY,
+        "Versão instalada: " + wxString::FromUTF8(applicationRevision().substr(0, 12))), 0, wxLEFT | wxRIGHT | wxTOP, 12);
+    updateText_ = new wxStaticText(configuration, wxID_ANY, wxString::FromUTF8(updater_->message()));
+    updateText_->SetName("Estado da atualização");
+    updateText_->Wrap(FromDIP(650));
+    configurationOuter->Add(updateText_, 0, wxEXPAND | wxALL, 12);
+    updateGauge_ = new wxGauge(configuration, wxID_ANY, 100);
+    updateGauge_->SetName("Progresso da atualização");
+    configurationOuter->Add(updateGauge_, 0, wxEXPAND | wxLEFT | wxRIGHT, 12);
+    auto* updateActions = new wxWrapSizer(wxHORIZONTAL);
+    addButton(configuration, updateActions, "Atualizar aplicação", ControlId::UpdateApplication);
+    addButton(configuration, updateActions, "Reiniciar agora", ControlId::RestartApplication);
+    addButton(configuration, updateActions, "Ver log da atualização", ControlId::UpdateLog);
+    configurationOuter->Add(updateActions, 0, wxEXPAND | wxALL, 7);
+    Bind(wxEVT_BUTTON, &MainFrame::onUpdateApplication, this, controlId(ControlId::UpdateApplication));
+    Bind(wxEVT_BUTTON, &MainFrame::onRestartApplication, this, controlId(ControlId::RestartApplication));
+    Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { if (!wxLaunchDefaultApplication(pathString(updater_->log()))) report("Não foi possível abrir o log da atualização."); }, controlId(ControlId::UpdateLog));
     configuration->SetSizer(configurationOuter);
     notebook->AddPage(configuration, "Configuração");
 
@@ -224,22 +257,60 @@ void MainFrame::buildUi() {
     matchSizer->AddGrowableCol(1, 1);
     auto* matchOuter = new wxBoxSizer(wxVERTICAL);
     sessionState_ = new wxStaticText(match, wxID_ANY, "Escolha os times para iniciar uma partida.");
-    matchOuter->Add(sessionState_, 0, wxALL, 12);
-    matchOuter->Add(new wxStaticText(match, wxID_ANY,
-        "Ctrl+Enter inicia a partida. Ctrl+H abre o histórico."), 0, wxALL, 12);
+    auto* identity = new wxBoxSizer(wxHORIZONTAL);
+    auto* mark = new wxStaticBitmap(match, wxID_ANY, unballLogo());
+    mark->SetName("Logo da UnBall");
+    mark->SetToolTip("UnBall, Universidade de Brasília");
+    identity->Add(mark, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 12);
+    auto* identityText = new wxBoxSizer(wxVERTICAL);
+    auto* title = new wxStaticText(match, wxID_ANY, "UnBall Manager 2D");
+    auto font = title->GetFont();
+    font.SetWeight(wxFONTWEIGHT_BOLD);
+    font.SetPointSize(font.GetPointSize() + 2);
+    title->SetFont(font);
+    identityText->Add(title, 0, wxBOTTOM, 3);
+    identityText->Add(sessionState_, 0);
+    identity->Add(identityText, 1, wxALIGN_CENTER_VERTICAL);
+    matchOuter->Add(identity, 0, wxEXPAND | wxALL, 8);
     sessionState_->SetName("Estado da sessão");
     leftTeam_->SetName("Time esquerdo");
     rightTeam_->SetName("Time direito");
     matchOuter->Add(matchSizer, 0, wxEXPAND | wxLEFT | wxRIGHT, 12);
     
     coachModeCheck_ = new wxCheckBox(match, wxID_ANY, "Permitir mover bola e jogadores no monitor (modo Coach)");
-    matchOuter->Add(coachModeCheck_, 0, wxALL, 12);
+    matchOuter->Add(coachModeCheck_, 0, wxALL, 8);
     
+    auto* batchOptions = new wxWrapSizer(wxHORIZONTAL);
+    batchOptions->Add(new wxStaticText(match, wxID_ANY, "Quantidade de jogos:"), 0, wxALIGN_CENTER_VERTICAL | wxALL, 4);
+    gameCount_ = new wxSpinCtrl(match, wxID_ANY, "1", wxDefaultPosition, FromDIP(wxSize(85, -1)), wxSP_ARROW_KEYS, 1, 1000, 1);
+    gameCount_->SetName("Quantidade de jogos");
+    batchOptions->Add(gameCount_, 0, wxALL, 4);
+    batchOptions->Add(new wxStaticText(match, wxID_ANY, "Limite por jogo (min):"), 0, wxALIGN_CENTER_VERTICAL | wxALL, 4);
+    gameTimeout_ = new wxSpinCtrl(match, wxID_ANY, "30", wxDefaultPosition, FromDIP(wxSize(85, -1)), wxSP_ARROW_KEYS, 1, 240, 30);
+    gameTimeout_->SetName("Tempo limite por jogo");
+    gameTimeout_->SetToolTip("Tempo máximo de uma partida em lote. Ao exceder, salva os logs e segue para a próxima.");
+    batchOptions->Add(gameTimeout_, 0, wxALL, 4);
+    matchOuter->Add(batchOptions, 0, wxEXPAND | wxLEFT | wxRIGHT, 8);
+    showMonitor_ = new wxCheckBox(match, wxID_ANY, "Abrir monitor em cada jogo");
+    showMonitor_->SetValue(true);
+    matchOuter->Add(showMonitor_, 0, wxALL, 8);
+    batchGauge_ = new wxGauge(match, wxID_ANY, 1);
+    batchGauge_->SetName("Progresso do lote");
+    matchOuter->Add(batchGauge_, 0, wxEXPAND | wxLEFT | wxRIGHT, 12);
+    batchText_ = new wxStaticText(match, wxID_ANY, "Escolha mais de um jogo para executar uma fila automática.");
+    batchText_->SetName("Estado do lote");
+    matchOuter->Add(batchText_, 0, wxEXPAND | wxALL, 8);
+    gameCount_->Bind(wxEVT_SPINCTRL, [this](wxSpinEvent&) { updateSessionState(); });
+
     auto* matchBtns = new wxWrapSizer(wxHORIZONTAL);
     auto* startMatch = addButton(match, matchBtns, "Iniciar partida", ControlId::PrepareMatch);
-    startMatch->SetToolTip("Iniciar com os times selecionados (Ctrl+Enter)");
-    addButton(match, matchBtns, "Encerrar sessão", ControlId::StopMatch);
+    startMatch->SetToolTip("Executar a quantidade de jogos escolhida (Ctrl+Enter)");
+    addButton(match, matchBtns, "Encerrar sessão", ControlId::StopMatch)->SetToolTip("Em um lote, encerra o jogo atual, preserva seus dados e cancela os seguintes.");
     addButton(match, matchBtns, "Abrir pasta da sessão", ControlId::OpenSessionDirectory);
+    addButton(match, matchBtns, "Abrir pasta do lote", ControlId::OpenBatchDirectory);
+    Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+        if (batch_ && !wxLaunchDefaultApplication(pathString(batch_->directory()))) report("Não foi possível abrir a pasta do lote.");
+    }, controlId(ControlId::OpenBatchDirectory));
     matchOuter->Add(matchBtns, 0, wxEXPAND | wxLEFT | wxRIGHT, 9);
     
     match->SetSizer(matchOuter);
@@ -430,7 +501,7 @@ void MainFrame::updateEnvironmentStatus() {
         : "Escolha um servidor executável na aba Configuração.");
 }
 void MainFrame::updateSessionState() {
-    const bool busy = sessionPid_ != 0;
+    const bool busy = sessionPid_ != 0 || batchBusy() || updater_->busy();
     for (const auto id : {ControlId::StartServer, ControlId::PrepareMatch, ControlId::SaveEnvironment,
                          ControlId::AddTeam, ControlId::ImportTeams, ControlId::RemoveTeam}) {
         if (auto* control = FindWindow(controlId(id))) control->Enable(!busy && !stopping_ && !closing_);
@@ -438,23 +509,39 @@ void MainFrame::updateSessionState() {
     if (auto* control = FindWindow(controlId(ControlId::PrepareMatch)))
         control->Enable(!busy && !stopping_ && !closing_ && store_.teams().size() >= 2);
     for (const auto id : {ControlId::StopAll, ControlId::StopMatch}) {
-        if (auto* control = FindWindow(controlId(id))) control->Enable(!processes_.empty() && !stopping_);
+        if (auto* control = FindWindow(controlId(id))) control->Enable((!processes_.empty() && !stopping_) || (batchBusy() && !batch_->cancelled()));
     }
     if (auto* control = FindWindow(controlId(ControlId::OpenSessionDirectory))) control->Enable(!activeSession_.directory.empty());
     leftTeam_->Enable(!busy); rightTeam_->Enable(!busy); coachModeCheck_->Enable(!busy);
+    gameCount_->Enable(!busy && !closing_);
+    gameTimeout_->Enable(!busy && !closing_ && gameCount_->GetValue() > 1);
+    showMonitor_->Enable(!busy && !closing_);
+    FindWindow(controlId(ControlId::OpenBatchDirectory))->Enable(static_cast<bool>(batch_));
+    if (auto* start = wxDynamicCast(FindWindow(controlId(ControlId::PrepareMatch)), wxButton)) {
+        const wxString label = gameCount_->GetValue() > 1 ? "Iniciar lote" : "Iniciar partida";
+        if (start->GetLabel() != label) start->SetLabel(label);
+    }
+    if (auto* stop = wxDynamicCast(FindWindow(controlId(ControlId::StopMatch)), wxButton)) {
+        const wxString label = batchBusy() ? "Cancelar lote" : "Encerrar sessão";
+        if (stop->GetLabel() != label) stop->SetLabel(label);
+    }
+    updateBatchProgress();
+    refreshUpdateState();
     const long selectedData = dataList_->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
     const bool hasData = selectedData >= 0 && static_cast<std::size_t>(selectedData) < dataSessions_.size();
     const DataSession* selectedSession = hasData ? &dataSessions_.at(static_cast<std::size_t>(selectedData)) : nullptr;
-    FindWindow(controlId(ControlId::ReprocessData))->Enable(selectedSession && !closing_ &&
+    FindWindow(controlId(ControlId::ReprocessData))->Enable(selectedSession && !closing_ && !updater_->busy() &&
         !(busy && selectedSession->directory == std::filesystem::weakly_canonical(activeSession_.directory)) && !exporter_->contains(selectedSession->directory));
     FindWindow(controlId(ControlId::OpenData))->Enable(selectedSession && !selectedSession->exportDirectory.empty());
     FindWindow(controlId(ControlId::DataProblems))->Enable(hasData);
     FindWindow(controlId(ControlId::HistoryFolder))->Enable(hasData);
     FindWindow(controlId(ControlId::HistoryReplay))->Enable(selectedSession && !selectedSession->replay.empty() && !monitorExecutable_.empty() && !(busy && selectedSession->directory == std::filesystem::weakly_canonical(activeSession_.directory)));
     FindWindow(controlId(ControlId::ReuseTeams))->Enable(selectedSession && !selectedSession->leftRoot.empty() && !selectedSession->rightRoot.empty() && !busy && !stopping_ && !closing_);
-    sessionState_->SetLabel(stopping_ ? "Encerrando os processos da sessão e aguardando a gravação dos logs…"
-        : busy ? "Sessão em execução. Consulte a saída na aba Eventos."
-        : "Nenhuma sessão em execução. Escolha dois times em Partida.");
+    const wxString sessionText = stopping_ ? "Encerrando os processos da sessão e aguardando a gravação dos logs…"
+        : sessionPid_ != 0 ? "Sessão em execução. Consulte a saída na aba Eventos."
+        : batchBusy() ? "Lote em andamento. Aguardando os dados para continuar."
+        : "Nenhuma sessão em execução. Escolha dois times em Partida.";
+    if (sessionState_->GetLabel() != sessionText) sessionState_->SetLabel(sessionText);
 }
 
 void MainFrame::onAddTeam(wxCommandEvent&) {
@@ -579,25 +666,29 @@ void MainFrame::startMonitorIfAvailable() {
 }
 
 void MainFrame::stopManagedProcesses() {
+    if (batchBusy()) { try { batch_->cancel(); } catch (const std::exception& error) { persistBatchFailure(error.what()); } }
     if (sessionPid_ != 0) stopRequested_ = true;
     for (auto& entry : processes_) entry.process->stop();
     stopping_ = !processes_.empty();
     updateSessionState();
 }
 
-void MainFrame::launchSession(const Team* left, const Team* right) {
-    if (closing_) return;
-    if (sessionPid_ != 0 || stopping_) { report("Encerre a sessão atual antes de iniciar outra."); return; }
+bool MainFrame::launchSession(const Team* left, const Team* right) {
+    if (closing_ || updater_->busy()) return false;
+    if (sessionPid_ != 0 || stopping_) { report("Encerre a sessão atual antes de iniciar outra."); return false; }
     try {
         if (!std::filesystem::is_directory(baseDirectory_)) throw std::runtime_error("Escolha uma pasta base válida na aba Configuração.");
         if (!std::filesystem::is_regular_file(serverExecutable_) || ::access(serverExecutable_.c_str(), X_OK) != 0)
             throw std::runtime_error("Escolha um rcssserver executável na aba Configuração.");
         activeSession_ = prepareSession(baseDirectory_, left && coachModeCheck_->GetValue(), left, right);
+        if (batchBusy() && batch_->ready()) batch_->startGame(activeSession_.directory);
         sessionLog_.open(activeSession_.runtime / "console.log", std::ios::binary);
         if (!sessionLog_) throw std::runtime_error("Não foi possível gravar a saída da sessão.");
         sessionPid_ = launchProcess({std::filesystem::absolute(serverExecutable_).string(), "include=config/session.conf"}, ProcessRole::Session,
                                    activeSession_.runtime, {{"RCSS_CONF_DIR", activeSession_.configuration.string()}});
         stopRequested_ = false;
+        gameTimedOut_ = false; gameEndedNormally_ = false; endEvidence_.clear();
+        gameStarted_ = std::chrono::steady_clock::now();
         if (left) rememberMatch();
         try {
             writeTextAtomically(sessionRuntimeDirectory(activeSession_.directory) / "session-state.json",
@@ -606,24 +697,48 @@ void MainFrame::launchSession(const Team* left, const Team* right) {
         refreshDataSessions();
         stopping_ = false;
         report("Servidor iniciado. Logs da sessão: " + pathString(activeSession_.logs));
-        startMonitorIfAvailable();
+        if (showMonitor_->GetValue()) startMonitorIfAvailable();
         updateSessionState();
+        return true;
     } catch (const std::exception& error) {
         sessionLog_.close(); sessionLog_.clear();
+        if (batchBusy()) persistBatchFailure(error.what());
         report("Sessão não iniciada: " + wxString::FromUTF8(error.what()));
         wxMessageBox(wxString::FromUTF8(error.what()), "Iniciar sessão", wxICON_ERROR);
+        return false;
     }
 }
 
 void MainFrame::onPrepareMatch(wxCommandEvent&) {
+    if (batchBusy() || updater_->busy() || sessionPid_ != 0 || stopping_ || closing_) return;
     const int left = leftTeam_->GetSelection(), right = rightTeam_->GetSelection();
     if (left == wxNOT_FOUND || right == wxNOT_FOUND || left == right) {
         report("Escolha dois times diferentes para iniciar a partida."); return;
     }
-    launchSession(&store_.teams().at(static_cast<std::size_t>(left)), &store_.teams().at(static_cast<std::size_t>(right)));
+    const auto& first = store_.teams().at(static_cast<std::size_t>(left));
+    const auto& second = store_.teams().at(static_cast<std::size_t>(right));
+    if (gameCount_->GetValue() == 1) { launchSession(&first, &second); return; }
+    try {
+        if (first.teamName == second.teamName || findTeamLauncher(first.root).empty() || findTeamLauncher(second.root).empty())
+            throw std::runtime_error("Escolha times com nomes distintos e inicializadores executáveis.");
+        if (!std::filesystem::is_directory(baseDirectory_) || !std::filesystem::is_regular_file(serverExecutable_) || ::access(serverExecutable_.c_str(), X_OK) != 0)
+            throw std::runtime_error("Revise a pasta base e o servidor na aba Configuração.");
+        batch_ = std::make_unique<BatchRun>(baseDirectory_, first, second, gameCount_->GetValue(),
+            gameTimeout_->GetValue() * 60, coachModeCheck_->GetValue(), showMonitor_->GetValue());
+        batchStarted_ = std::chrono::steady_clock::now();
+        batchGauge_->SetRange(batch_->total());
+        report("Lote iniciado: " + pathString(batch_->directory()));
+        outputTimer_.Start(100);
+        advanceBatch();
+        updateSessionState();
+    } catch (const std::exception& error) {
+        report("Lote não iniciado: " + wxString::FromUTF8(error.what()));
+        wxMessageBox(wxString::FromUTF8(error.what()), "Iniciar lote", wxICON_WARNING);
+    }
 }
 
 void MainFrame::onSaveEnvironment(wxCommandEvent&) {
+    if (batchBusy() || updater_->busy()) return;
     try {
         const std::filesystem::path base = baseDirectoryField_->GetValue().ToStdString();
         const std::filesystem::path server = serverField_->GetValue().ToStdString();
@@ -668,10 +783,12 @@ void MainFrame::onChooseAutoMatch(wxCommandEvent&) {
     if (!path.empty()) autoMatchField_->SetValue(path);
 }
 
-void MainFrame::onStartServer(wxCommandEvent&) { launchSession(); }
+void MainFrame::onStartServer(wxCommandEvent&) { if (!batchBusy() && !updater_->busy()) launchSession(); }
 
 void MainFrame::onStopAll(wxCommandEvent&) {
+    const bool cancellingBatch = batchBusy();
     stopManagedProcesses();
+    if (cancellingBatch) { report("Cancelamento do lote solicitado. Aguardando o jogo atual e seus dados."); return; }
     report(processes_.empty() ? "Nenhuma sessão para encerrar." : "Encerramento solicitado. Aguardando os logs…");
 }
 
@@ -681,8 +798,9 @@ void MainFrame::onOpenSessionDirectory(wxCommandEvent&) {
 }
 
 void MainFrame::onClose(wxCloseEvent& event) {
-    if ((!processes_.empty() || exporter_->busy()) && event.CanVeto()) {
+    if ((!processes_.empty() || exporter_->busy() || batchBusy() || updater_->busy()) && event.CanVeto()) {
         closing_ = true;
+        updater_->cancel();
         stopManagedProcesses();
         outputTimer_.Start(100);
         report("Encerrando a sessão e aguardando a extração dos dados…");
@@ -694,10 +812,22 @@ void MainFrame::onClose(wxCloseEvent& event) {
 
 void MainFrame::onPollProcessOutput(wxTimerEvent&) {
     bool sessionEnded = false;
+    int sessionExitCode = -1;
+    if (batchBusy() && sessionPid_ != 0 && !gameTimedOut_ && !stopRequested_ &&
+        batch_->timedOut(std::chrono::duration<double>(std::chrono::steady_clock::now() - gameStarted_).count())) {
+        gameTimedOut_ = true; stopRequested_ = true; stopping_ = true;
+        for (auto& entry : processes_) if (entry.role == ProcessRole::Session || entry.role == ProcessRole::Monitor) entry.process->stop();
+        report("Tempo limite atingido. Encerrando o jogo e preservando os dados antes de continuar o lote.");
+    }
     for (auto& entry : processes_) {
         const auto output = entry.process->poll();
         if (entry.role == ProcessRole::Session && sessionLog_.is_open()) {
             sessionLog_ << output; sessionLog_.flush();
+        }
+        if (entry.role == ProcessRole::Session) {
+            endEvidence_ += output;
+            if (endEvidence_.find("Game Over") != std::string::npos) gameEndedNormally_ = true;
+            if (endEvidence_.size() > 32) endEvidence_.erase(0, endEvidence_.size() - 32);
         }
         entry.pendingOutput += output;
         std::size_t end;
@@ -715,12 +845,21 @@ void MainFrame::onPollProcessOutput(wxTimerEvent&) {
         if (entry.process->finished()) {
             report(wxString::Format("Processo %d encerrado (código %d).", entry.process->pid(), entry.process->exitCode().value_or(-1)));
             if (entry.role == ProcessRole::Session) {
+                sessionExitCode = entry.process->exitCode().value_or(-1);
                 sessionPid_ = 0; sessionEnded = true;
                 sessionLog_.close(); sessionLog_.clear();
             }
         }
     }
     if (sessionEnded) {
+        if (batchBusy() && batch_->gameRunning()) {
+            try {
+                const auto outcome = gameTimedOut_ ? "timeout" : sessionExitCode == 0 && gameEndedNormally_ ? "completed" :
+                    stopRequested_ ? "cancelled" : "failed";
+                batch_->endGame(outcome, sessionExitCode,
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - gameStarted_).count());
+            } catch (const std::exception& error) { persistBatchFailure(error.what()); }
+        }
         markSessionEnded(stopRequested_);
         try { exporter_->enqueue(activeSession_.directory); }
         catch (const std::exception& error) { report("Extração não agendada: " + wxString::FromUTF8(error.what())); }
@@ -732,13 +871,24 @@ void MainFrame::onPollProcessOutput(wxTimerEvent&) {
     if (sessionPid_ == 0 && !stopRequested_) {
         stopping_ = std::any_of(processes_.begin(), processes_.end(), [](const ProcessEntry& entry) { return entry.role == ProcessRole::Monitor; });
     }
+    const bool updateChanged = updater_->poll();
+    if (updateChanged) {
+        if (!updater_->busy()) {
+            restartTarget_ = installedUpdate(appData_);
+            const auto current = std::filesystem::path(wxStandardPaths::Get().GetExecutablePath().ToStdString());
+            if (!restartTarget_.empty() && std::filesystem::weakly_canonical(restartTarget_) == std::filesystem::weakly_canonical(current)) restartTarget_.clear();
+        }
+        refreshUpdateState();
+    }
     const bool exportChanged = exporter_->poll();
     if (exportChanged) { report(wxString::FromUTF8(exporter_->message())); refreshDataSessions(); }
     if (sessionEnded) refreshDataSessions();
+    if (sessionPid_ == 0 && std::none_of(processes_.begin(), processes_.end(), [](const ProcessEntry& entry) { return entry.role != ProcessRole::Replay; })) stopping_ = false;
+    advanceBatch();
     if (processes_.empty()) {
         stopping_ = false;
-        if (!exporter_->busy()) outputTimer_.Stop();
-        if (closing_ && !exporter_->busy()) { Destroy(); return; }
+        if (!exporter_->busy() && !batchBusy() && !updater_->busy()) outputTimer_.Stop();
+        if (closing_ && !exporter_->busy() && !batchBusy() && !updater_->busy()) { Destroy(); return; }
     }
     updateSessionState();
 }
@@ -843,7 +993,7 @@ void MainFrame::filterDataSessions() {
     dataList_->DeleteAllItems();
     dataSessions_.clear();
     for (const auto& session : allDataSessions_) {
-        const auto text = wxString::FromUTF8(session.label + " " + session.createdAt + " " + session.directory.filename().string()).Lower();
+        const auto text = wxString::FromUTF8(session.label + " " + session.createdAt + " " + session.batchId + " " + session.directory.filename().string()).Lower();
         if (!search.empty() && !text.Contains(search)) continue;
         if (filter == 1 && session.exportDirectory.empty()) continue;
         if (filter == 2 && session.status != "failed" && session.status != "completed_with_warnings" && !((session.status == "queued" || session.status == "extracting") && !exporter_->contains(session.directory))) continue;
@@ -888,6 +1038,7 @@ void MainFrame::updateHistoryDetail() {
         text = wxString::Format("%zu partida(s) na lista. ", dataSessions_.size()) +
             (session.exportDirectory.empty() ? "CSV ainda não disponível. " : "Duplo clique abre os CSVs. ") +
             "\nLogs originais e versões anteriores ficam na pasta da partida.";
+        if (!session.batchId.empty()) text += wxString::Format(" Jogo %d/%d do lote ", session.batchIndex, session.batchTotal) + wxString::FromUTF8(session.batchId);
         historyDetail_->SetToolTip(pathString(session.directory));
     }
     historyDetail_->SetLabel(text);
@@ -897,7 +1048,7 @@ void MainFrame::updateHistoryDetail() {
 
 void MainFrame::onReprocessData(wxCommandEvent&) {
     const long selected = dataList_->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
-    if (selected < 0 || static_cast<std::size_t>(selected) >= dataSessions_.size() || closing_) return;
+    if (selected < 0 || static_cast<std::size_t>(selected) >= dataSessions_.size() || closing_ || updater_->busy()) return;
     const auto directory = dataSessions_.at(static_cast<std::size_t>(selected)).directory;
     if (sessionPid_ != 0 && directory == std::filesystem::weakly_canonical(activeSession_.directory)) {
         report("Aguarde a sessão encerrar antes de extrair os dados."); return;
@@ -961,7 +1112,7 @@ void MainFrame::onHistoryFolder(wxCommandEvent&) {
 
 void MainFrame::onReuseTeams(wxCommandEvent&) {
     const long selected = dataList_->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
-    if (selected < 0 || static_cast<std::size_t>(selected) >= dataSessions_.size() || sessionPid_ != 0 || stopping_ || closing_) return;
+    if (selected < 0 || static_cast<std::size_t>(selected) >= dataSessions_.size() || sessionPid_ != 0 || batchBusy() || updater_->busy() || stopping_ || closing_) return;
     const auto& session = dataSessions_.at(static_cast<std::size_t>(selected));
     int left = wxNOT_FOUND, right = wxNOT_FOUND;
     for (std::size_t i = 0; i < store_.teams().size(); ++i) {
@@ -1002,4 +1153,106 @@ void MainFrame::restoreMatch() {
         }
         coachModeCheck_->SetValue(settings.value("coach", false));
     } catch (const std::exception& error) { report("Preferências não carregadas: " + wxString::FromUTF8(error.what())); }
+}
+
+bool MainFrame::batchBusy() const noexcept { return batch_ && !batch_->finished(); }
+
+void MainFrame::persistBatchFailure(const std::string& reason) {
+    if (!batch_) return;
+    try { batch_->abort(reason); }
+    catch (const std::exception& error) { report("Lote interrompido; falha ao salvar o resumo: " + wxString::FromUTF8(error.what())); }
+}
+
+void MainFrame::advanceBatch() {
+    if (!batchBusy()) return;
+    try {
+        if (batch_->waitingForExport() && !exporter_->contains(activeSession_.directory)) {
+            std::string status = "failed";
+            std::optional<bool> normalEnd;
+            try {
+                std::ifstream input(sessionRuntimeDirectory(activeSession_.directory) / "extraction.json");
+                const auto result = nlohmann::json::parse(input);
+                const auto value = result.value("status", "failed");
+                if (value == "completed" || value == "completed_with_warnings") status = value;
+            } catch (const std::exception&) { /* Missing/invalid state is an export failure, never a success. */ }
+            if (status != "failed") {
+                try {
+                    const auto sessions = findDataSessions(baseDirectory_);
+                    const auto session = std::find_if(sessions.begin(), sessions.end(), [this](const DataSession& item) { return item.directory == activeSession_.directory; });
+                    if (session != sessions.end() && !session->exportDirectory.empty()) {
+                        std::ifstream input(session->exportDirectory / "manifest.json");
+                        normalEnd = nlohmann::json::parse(input).value("ending", "") == "normal";
+                    }
+                } catch (const std::exception&) { status = "failed"; }
+            }
+            batch_->endExport(status, normalEnd);
+            if (batch_->finished()) report("Lote finalizado. Resumo e arquivos: " + pathString(batch_->directory()));
+        }
+        if (batch_->ready() && !closing_ && sessionPid_ == 0 && !stopping_) {
+            launchSession(&batch_->left(), &batch_->right());
+        }
+    } catch (const std::exception& error) {
+        persistBatchFailure(error.what());
+        report("Lote interrompido: " + wxString::FromUTF8(error.what()));
+    }
+}
+
+void MainFrame::updateBatchProgress() {
+    if (!batch_) return;
+    if (batchGauge_->GetRange() != batch_->total()) batchGauge_->SetRange(batch_->total());
+    if (batchGauge_->GetValue() != batch_->settled()) batchGauge_->SetValue(batch_->settled());
+    wxString text;
+    if (batch_->finished()) {
+        text = batch_->status() == "cancelled" ? "Lote cancelado: " : batch_->status() == "failed" ? "Lote interrompido por erro: " : "Lote concluído: ";
+        text += wxString::Format("%d de %d processados; %d falhas de jogo e %d de extração.",
+            batch_->settled(), batch_->total(), batch_->failures(), batch_->exportFailures());
+    } else {
+        text = batch_->cancelled() ? "Cancelando lote. " : "";
+        text += wxString::Format("%d de %d finalizados. Jogo %d: ", batch_->settled(), batch_->total(), batch_->started());
+        text += batch_->waitingForExport() ? "exportando os CSVs." : "em execução.";
+        if (batch_->settled() > 0 && !batch_->cancelled()) {
+            const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - batchStarted_).count();
+            const auto remaining = static_cast<long>(seconds / batch_->settled() * (batch_->total() - batch_->settled()));
+            text += wxString::Format(" Restante estimado: %ld min %ld s.", remaining / 60, remaining % 60);
+        }
+    }
+    if (batchCaption_ != text) {
+        batchCaption_ = text;
+        batchText_->SetLabel(text);
+        batchText_->Wrap(FromDIP(680));
+        batchText_->GetParent()->Layout();
+    }
+}
+
+void MainFrame::refreshUpdateState() {
+    if (!updateText_) return;
+    const wxString text = wxString::FromUTF8(updater_->message());
+    if (updateText_->GetLabel() != text) { updateText_->SetLabel(text); updateText_->Wrap(FromDIP(650)); updateText_->GetParent()->Layout(); }
+    if (updateGauge_->GetValue() != updater_->progress()) updateGauge_->SetValue(updater_->progress());
+    const bool occupied = sessionPid_ != 0 || batchBusy() || !processes_.empty() || exporter_->busy();
+    auto* button = wxDynamicCast(FindWindow(controlId(ControlId::UpdateApplication)), wxButton);
+    const wxString label = updater_->busy() ? "Cancelar atualização" : "Atualizar aplicação";
+    if (button->GetLabel() != label) button->SetLabel(label);
+    button->Enable(!closing_ && (!occupied || updater_->busy()));
+    FindWindow(controlId(ControlId::RestartApplication))->Enable(!closing_ && !occupied && !updater_->busy() && !restartTarget_.empty());
+    FindWindow(controlId(ControlId::UpdateLog))->Enable(std::filesystem::is_regular_file(updater_->log()));
+}
+
+void MainFrame::onUpdateApplication(wxCommandEvent&) {
+    if (updater_->busy()) { updater_->cancel(); refreshUpdateState(); return; }
+    if (closing_ || sessionPid_ != 0 || batchBusy() || !processes_.empty() || exporter_->busy()) return;
+    try {
+        updater_->start();
+        outputTimer_.Start(100);
+        updateSessionState();
+    } catch (const std::exception& error) { report("Atualização não iniciada: " + wxString::FromUTF8(error.what())); }
+}
+
+void MainFrame::onRestartApplication(wxCommandEvent&) {
+    if (closing_ || sessionPid_ != 0 || batchBusy() || !processes_.empty() || exporter_->busy() || updater_->busy()) return;
+    const auto executable = installedUpdate(appData_);
+    if (executable.empty()) { report("Não há atualização instalada para abrir."); return; }
+    const char* arguments[]{executable.c_str(), nullptr};
+    if (wxExecute(arguments, wxEXEC_ASYNC | wxEXEC_MAKE_GROUP_LEADER) > 0) Close();
+    else report("Não foi possível abrir a versão atualizada.");
 }

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=UnBall Manager 2D
+Comment=Partidas, testes e dados do RoboCup 2D
+Exec=UnBall-Manager2D
+Icon=unball-manager2d
+StartupWMClass=unball-manager2d
+Terminal=false
+Categories=Development;Education;

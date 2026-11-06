@@ -3,6 +3,12 @@
 #include <wx/app.h>
 #include <clocale>
 #include <wx/button.h>
+#include <wx/spinctrl.h>
+#include <wx/stattext.h>
+#include <wx/gauge.h>
+#include <wx/checkbox.h>
+#include <fstream>
+#include <iterator>
 #include <wx/dcscreen.h>
 #include <wx/dcmemory.h>
 #include <wx/image.h>
@@ -17,7 +23,14 @@
 #include <iostream>
 #include <unistd.h>
 
-namespace { int uiTestExitCode = 0; }
+namespace {
+int uiTestExitCode = 0;
+std::string shellQuote(const std::string& value) {
+    std::string result = "'";
+    for (char c : value) result += c == '\'' ? "'\"'\"'" : std::string(1, c);
+    return result + "'";
+}
+}
 
 class UiTests final : public wxApp {
 public:
@@ -27,15 +40,28 @@ public:
         SetAppName("UnBallManagerUITest-" + std::to_string(::getpid()));
         appData_ = wxStandardPaths::Get().GetUserDataDir().ToStdString();
         require(!std::filesystem::exists(appData_));
+        wxString batchTest;
+        batchMode_ = wxGetEnv("UNBALL_UI_BATCH_TEST", &batchTest);
+        updateMode_ = wxGetEnv("UNBALL_UI_UPDATER_TEST", &batchTest);
         const auto server = temporary_.path / "fake server";
+        fakeServer_ = server;
         executable(server, "#!/bin/sh\ntrap 'printf finished; exit 0' INT TERM\nprintf 'ULG6\\n(team 0 left right 0 0)\\n(show 0 ((b) 0 0 0 0))\\n' > ../logs/ui.rcg\nprintf started\\n\nwhile :; do sleep 1; done\n");
+        if (batchMode_) executable(server, "#!/bin/sh\nprintf 'ULG6\\n(team 0 left right 0 0)\\n(show 0 ((b) 0 0 0 0))\\n(playmode 0 time_over)\\n' > ../logs/ui.rcg\nprintf 'Game Over. Exiting...\\n'\n");
+        wxString realServer, realStrategy;
+        realMode_ = batchMode_ && wxGetEnv("UNBALL_UI_REAL_SERVER", &realServer) && wxGetEnv("UNBALL_UI_REAL_STRATEGY", &realStrategy);
+        realStrategy_ = realStrategy.ToStdString();
+        if (realMode_) executable(server, "#!/bin/sh\nexec " + shellQuote(realServer.ToStdString()) +
+            " \"$@\" server::port=16000 server::coach_port=16001 server::olcoach_port=16002 server::half_time=3 server::nr_normal_halfs=2 server::nr_extra_halfs=0 server::penalty_shoot_outs=false server::game_over_wait=1 server::connect_wait=2 server::kick_off_wait=5\n");
+        const auto monitor = temporary_.path / "fake monitor";
+        executable(monitor, "#!/bin/sh\nprintf started > " + shellQuote((temporary_.path / "monitor-started").string()) + "\n");
         writeTextAtomically(appData_ / "environment.json", nlohmann::json{
             {"baseDirectory", temporary_.path.string()}, {"serverExecutable", server.string()},
-            {"monitorExecutable", ""}, {"autoMatchScript", ""}}.dump());
+            {"monitorExecutable", batchMode_ ? monitor.string() : ""}, {"autoMatchScript", ""}}.dump());
         TeamStore teams(appData_ / "teams.json");
         for (const auto* name : {"left", "right"}) {
             const auto root = temporary_.path / name;
-            executable(root / "start.sh", "#!/bin/sh\nexit 0\n");
+            executable(root / "start.sh", realMode_ ? "#!/bin/sh\ncd " + shellQuote(realStrategy_) +
+                "\nexec ./start.sh -p 16000 -P 16002 -t " + name + "\n" : "#!/bin/sh\nexit 0\n");
             teams.add({name, name, root, true});
         }
         writeTextAtomically(appData_ / "ui.json", nlohmann::json{
@@ -52,7 +78,7 @@ public:
         }
         timer_.SetOwner(this);
         Bind(wxEVT_TIMER, &UiTests::tick, this);
-        deadline_ = std::chrono::steady_clock::now() + std::chrono::seconds(25);
+        deadline_ = std::chrono::steady_clock::now() + std::chrono::seconds(realMode_ ? 75 : 25);
         timer_.Start(200);
         return true;
     }
@@ -90,8 +116,12 @@ private:
     void tick(wxTimerEvent&) {
         try {
             require(std::chrono::steady_clock::now() < deadline_);
+            if (batchMode_) { tickBatch(); return; }
+            if (updateMode_) { tickUpdate(); return; }
             if (stage_ == 0) {
                 require(start_->IsEnabled() && !stop_->IsEnabled());
+                auto* update = wxDynamicCast(wxWindow::FindWindowByLabel(wxString::FromUTF8("Atualizar aplicação"), frame_), wxButton);
+                require(update && update->IsEnabled());
                 capture("900x620.png");
                 frame_->SetSize(780, 540);
                 ++stage_;
@@ -100,6 +130,8 @@ private:
                 require(start_->IsShownOnScreen());
                 press(start_);
                 require(!start_->IsEnabled() && stop_->IsEnabled());
+                auto* update = wxDynamicCast(wxWindow::FindWindowByLabel(wxString::FromUTF8("Atualizar aplicação"), frame_), wxButton);
+                require(update && !update->IsEnabled());
                 // The handler itself rejects a second session, even if an event is injected.
                 press(start_);
                 require(findDataSessions(temporary_.path).size() == 1);
@@ -180,6 +212,86 @@ private:
             frame_->Destroy();
         }
     }
+    void tickUpdate() {
+        auto* gauge = dynamic_cast<wxGauge*>(wxWindow::FindWindowByName(wxString::FromUTF8("Progresso da atualização"), frame_));
+        auto* state = dynamic_cast<wxStaticText*>(wxWindow::FindWindowByName(wxString::FromUTF8("Estado da atualização"), frame_));
+        require(gauge && state);
+        if (stage_ == 0) {
+            auto* update = wxDynamicCast(wxWindow::FindWindowByLabel(wxString::FromUTF8("Atualizar aplicação"), frame_), wxButton);
+            require(update && update->IsEnabled());
+            auto* notebook = dynamic_cast<wxNotebook*>(state->GetParent()->GetParent());
+            require(notebook);
+            notebook->SetSelection(5);
+            press(update);
+            require(!start_->IsEnabled());
+            ++stage_;
+        } else if (stage_ == 1 && start_->IsEnabled()) {
+            require(gauge->GetValue() == 100);
+            require(state->GetLabel().Contains(wxString::FromUTF8("já está atualizada")));
+            capture("atualizacao.png");
+            timer_.Stop();
+            std::cout << "GUI: botão de atualização consultou o GitHub e confirmou a versão atual.\n";
+            frame_->Close();
+        }
+    }
+    nlohmann::json read(const std::filesystem::path& path) {
+        std::ifstream input(path); return nlohmann::json::parse(input);
+    }
+    void tickBatch() {
+        auto* count = dynamic_cast<wxSpinCtrl*>(wxWindow::FindWindowByName("Quantidade de jogos", frame_));
+        auto* gauge = dynamic_cast<wxGauge*>(wxWindow::FindWindowByName("Progresso do lote", frame_));
+        require(count && gauge);
+        if (stage_ == 0) {
+            auto* monitor = dynamic_cast<wxCheckBox*>(wxWindow::FindWindowByLabel("Abrir monitor em cada jogo", frame_));
+            require(monitor);
+            monitor->SetValue(false);
+            count->SetValue(3);
+            press(start_);
+            require(!start_->IsEnabled() && !count->IsEnabled());
+            press(start_); // A second event must not replace a running batch.
+            ++stage_;
+        } else if (stage_ == 1 && start_->IsEnabled()) {
+            const auto sessions = findDataSessions(temporary_.path);
+            require(sessions.size() == 3);
+            require(gauge->GetRange() == 3 && gauge->GetValue() == 3);
+            std::string batchId;
+            for (const auto& session : sessions) {
+                require(!session.exportDirectory.empty());
+                require(session.batchTotal == 3 && session.batchIndex >= 1 && session.batchIndex <= 3);
+                if (batchId.empty()) batchId = session.batchId;
+                require(session.batchId == batchId);
+                if (realMode_) {
+                    std::ifstream console(sessionRuntimeDirectory(session.directory) / "console.log");
+                    const std::string output((std::istreambuf_iterator<char>(console)), {});
+                    int players = 0;
+                    for (std::size_t position = 0; (position = output.find(" player (", position)) != std::string::npos; ++position) ++players;
+                    require(players == 22);
+                }
+            }
+            const auto metadata = read(sessions[0].directory / "match.json");
+            const auto summary = read(std::filesystem::path(metadata["batch_directory"].get<std::string>()) / "lote.json");
+            require(summary["settled"] == 3 && summary["status"] == "completed");
+            require(!std::filesystem::exists(temporary_.path / "monitor-started"));
+            // Next batch is cancelled while its first game is active; pending games must never start.
+            executable(fakeServer_, "#!/bin/sh\ntrap 'exit 0' INT TERM\nprintf 'ULG6\\n(team 0 left right 0 0)\\n(show 0 ((b) 0 0 0 0))\\n' > ../logs/ui.rcg\nwhile :; do sleep 1; done\n");
+            count->SetValue(5);
+            press(start_);
+            require(!start_->IsEnabled());
+            ++stage_;
+        } else if (stage_ == 2) {
+            press(stop_);
+            ++stage_;
+        } else if (stage_ == 3 && start_->IsEnabled()) {
+            const auto sessions = findDataSessions(temporary_.path);
+            require(sessions.size() == 4 && gauge->GetValue() == 1);
+            const auto metadata = read(sessions[0].directory / "match.json");
+            const auto summary = read(std::filesystem::path(metadata["batch_directory"].get<std::string>()) / "lote.json");
+            require(summary["status"] == "cancelled" && summary["started"] == 1 && summary["total"] == 5);
+            timer_.Stop();
+            std::cout << "GUI: lote de três jogos com CSVs e cancelamento sem iniciar pendentes verificados.\n";
+            frame_->Close();
+        }
+    }
     TemporaryDirectory temporary_;
     std::filesystem::path appData_, screenshots_, previousExport_;
     MainFrame* frame_{};
@@ -190,6 +302,11 @@ private:
     int stage_{};
     int settleTicks_{};
     bool failed_{};
+    bool updateMode_{};
+    bool batchMode_{};
+    bool realMode_{};
+    std::string realStrategy_;
+    std::filesystem::path fakeServer_;
     bool checkCloseExport_{};
 };
 

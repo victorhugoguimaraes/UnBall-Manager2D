@@ -30,6 +30,8 @@ struct DataSession {
     std::filesystem::path directory;
     std::string label;
     std::string createdAt;
+    std::string batchId;
+    int batchIndex = 0, batchTotal = 0;
     std::filesystem::path leftRoot, rightRoot, replay;
     std::string status;
     std::string coverage;

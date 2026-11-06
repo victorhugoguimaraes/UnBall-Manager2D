@@ -4,6 +4,8 @@
 #include "ChildProcess.hpp"
 #include "Session.hpp"
 #include "DataExport.hpp"
+#include "BatchRun.hpp"
+#include "AppUpdate.hpp"
 
 #include <wx/frame.h>
 
@@ -22,6 +24,8 @@ class wxCheckBox;
 class wxNotebook;
 class wxSearchCtrl;
 class wxChoice;
+class wxSpinCtrl;
+class wxGauge;
 
 class MainFrame final : public wxFrame {
 public:
@@ -78,9 +82,16 @@ private:
     long launchProcess(const std::vector<std::string>& arguments, ProcessRole role,
                        const std::filesystem::path& directory = {},
                        const std::map<std::string, std::string>& environment = {});
-    void launchSession(const Team* left = nullptr, const Team* right = nullptr);
+    bool launchSession(const Team* left = nullptr, const Team* right = nullptr);
     void watchReplay(const std::filesystem::path& path);
     void updateSessionState();
+    bool batchBusy() const noexcept;
+    void advanceBatch();
+    void updateBatchProgress();
+    void onUpdateApplication(wxCommandEvent& event);
+    void onRestartApplication(wxCommandEvent& event);
+    void refreshUpdateState();
+    void persistBatchFailure(const std::string& reason);
 
     std::filesystem::path appData_;
     TeamStore store_;
@@ -92,6 +103,16 @@ private:
     wxComboBox* leftTeam_{};
     wxComboBox* rightTeam_{};
     wxCheckBox* coachModeCheck_{};
+    wxCheckBox* showMonitor_{};
+    wxSpinCtrl* gameCount_{};
+    wxSpinCtrl* gameTimeout_{};
+    wxGauge* batchGauge_{};
+    wxStaticText* batchText_{};
+    wxString batchCaption_;
+    std::unique_ptr<BatchRun> batch_;
+    std::chrono::steady_clock::time_point gameStarted_, batchStarted_;
+    bool gameTimedOut_ = false, gameEndedNormally_ = false;
+    std::string endEvidence_;
     wxTextCtrl* events_{};
     wxStaticText* environment_{};
     wxStatusBar* status_{};
@@ -108,6 +129,10 @@ private:
     std::vector<DataSession> allDataSessions_;
     std::vector<DataSession> dataSessions_;
     std::unique_ptr<DataExport> exporter_;
+    std::unique_ptr<AppUpdate> updater_;
+    wxStaticText* updateText_{};
+    wxGauge* updateGauge_{};
+    std::filesystem::path restartTarget_;
     bool stopRequested_{};
     std::vector<std::filesystem::path> currentReplays_;
     std::vector<ProcessEntry> processes_;

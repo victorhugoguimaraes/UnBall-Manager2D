@@ -1,0 +1,3 @@
+#pragma once
+// Original UnBall artwork embedded at configure time; see assets/COPYING-UNBALL.
+inline constexpr unsigned char unballLogoPng[] = {@UNBALL_LOGO_DATA@};

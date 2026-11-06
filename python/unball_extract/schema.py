@@ -5,7 +5,7 @@ COMMON = ['sessao_id']
 SOURCE = ['fonte', 'linha']
 TIME = ['quadro_id', 'ciclo', 'ordem_no_ciclo', 'modo']
 TABLES = {
-    'partida': COMMON + ['time_l', 'time_r', 'time_selecionado_l', 'time_selecionado_r',
+    'partida': COMMON + ['batch_id', 'batch_index', 'batch_total', 'time_l', 'time_r', 'time_selecionado_l', 'time_selecionado_r',
         'gols_l', 'gols_r', 'ciclo_inicial', 'ciclo_final', 'ciclos_registrados',
         'quadros', 'ciclos_play_on', 'ciclos_ausentes_intervalo', 'ciclos_ausentes_fronteira', 'ciclos_ausentes_inesperados', 'quadros_incompletos',
         'termino', 'cobertura', 'rcg_disponivel', 'rcl_disponivel'],
@@ -28,6 +28,9 @@ TABLES = {
     'dicionario_campos': ['tabela', 'campo', 'tipo', 'unidade', 'descricao', 'ausencia'],
 }
 DESCRIPTIONS = {
+    'batch_id': 'Identificador do lote do Manager; vazio para partidas avulsas',
+    'batch_index': 'Número do jogo dentro do lote, começando em 1',
+    'batch_total': 'Quantidade de jogos solicitados no lote, incluindo os não iniciados se cancelado',
     'sessao_id': 'Identificador da pasta da sessão; não identifica sozinho o conteúdo das fontes',
     'quadro_id': 'Ordem do show no RCG; chave do quadro dentro da sessão',
     'ciclo': 'Relógio simulado registrado; pode se repetir durante interrupções',
@@ -68,7 +71,7 @@ def describe(table, field):
         kind = 'inteiro'
     elif field in ('x', 'y', 'vx', 'vy', 'corpo', 'pescoco', 'stamina', 'effort', 'recovery', 'capacity') or field.startswith(('stamina_', 'distancia_')):
         kind = 'numero'
-    elif field in ('ciclo', 'subciclo', 'quadro_id', 'linha', 'camisa', 'tipo', 'estado', 'gols_l', 'gols_r', 'ordem_no_ciclo') or field.startswith(('quadros', 'ciclos_', 'intervalos_', 'amostras_', 'reinicios_')):
+    elif field in ('ciclo', 'subciclo', 'quadro_id', 'linha', 'camisa', 'tipo', 'estado', 'gols_l', 'gols_r', 'ordem_no_ciclo', 'batch_index', 'batch_total') or field.startswith(('quadros', 'ciclos_', 'intervalos_', 'amostras_', 'reinicios_')):
         kind = 'inteiro'
     return dict(tabela=table + '.csv', campo=field, tipo=kind, unidade=unit,
                 descricao=description, ausencia='Campo vazio = indisponível/não calculável; consulte qualidade.csv e manifest.json')

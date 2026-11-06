@@ -191,6 +191,13 @@ class ExtractionTests(unittest.TestCase):
         self.assertEqual(manifest['layout_version'], 2)
         self.assertIn('csv/bola.csv', manifest['files'])
 
+    def test_batch_metadata_in_game_csv(self):
+        (self.session / 'match.json').write_text(json.dumps({'batch_id': 'lote-1', 'batch_index': 2, 'batch_total': 5}))
+        output = self.output(export_session(self.session))
+        game = self.rows(output, 'partida')[0]
+        self.assertEqual((game['batch_id'], game['batch_index'], game['batch_total']), ('lote-1', '2', '5'))
+        self.assertEqual(json.loads((output.parent / 'manifest.json').read_text())['schema_version'], '1.1')
+
     def test_structure_of_say_and_unbalanced_parentheses(self):
         self.assertEqual(len(parse_many('(say "escaped \\\" (kick 1 2)")(dash 3)')), 2)
         with self.assertRaises(ValueError):

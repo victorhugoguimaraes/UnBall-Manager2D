@@ -76,4 +76,10 @@ Novas sessões usam pastas por dia e confronto. Scripts, configurações e regis
 
 O histórico reconhece sessões antigas diretamente em `runs/UnBall-Manager2D` e as novas dentro de uma pasta de data. Exportações antigas com CSVs na raiz da versão também continuam acessíveis. Reprocessar cria uma nova versão organizada, preservando a anterior. Não há exclusão automática de logs ou versões.
 
-O formato dos CSVs continua no esquema 1.0. A disposição das pastas é identificada separadamente como `layout_version: 2`, e o extrator passou para 1.1.0. Caminhos em `manifest.json` são relativos à pasta da versão; leitores externos devem usar esses caminhos ou acrescentar `csv/` nos resultados novos.
+O esquema CSV passou para 1.1, acrescentando `batch_id`, `batch_index` e `batch_total` em `partida.csv`. Esses campos ficam vazios nas partidas avulsas. A disposição das pastas é identificada separadamente como `layout_version: 2`, e o extrator passou para 1.2.0. Caminhos em `manifest.json` são relativos à pasta da versão; leitores externos devem usar esses caminhos ou acrescentar `csv/` nos resultados novos.
+
+## Jogos em lote
+
+Cada jogo é extraído separadamente. O Manager aguarda essa etapa antes de continuar a fila; falhas da extração ficam no resumo do lote e não removem os logs. `partida.csv` vincula a sessão ao lote, enquanto as outras tabelas se relacionam por `sessao_id`.
+
+O resultado de execução do jogo e a qualidade dos dados são diferentes: um jogo pode terminar normalmente e ter avisos de cobertura. O resumo só registra o ciclo de execução e extração, não compara estratégias nem calcula vitórias agregadas. Consulte o placar e a cobertura de cada CSV antes de comparar resultados.
