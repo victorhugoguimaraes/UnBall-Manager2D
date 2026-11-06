@@ -141,13 +141,13 @@ wxString chooseFile(wxWindow* parent, const wxString& defaultPath, const wxStrin
 }
 
 MainFrame::MainFrame()
-    : wxFrame(nullptr, wxID_ANY, "UnBall-Manager2D", wxDefaultPosition, wxSize(900, 620)),
+    : wxFrame(nullptr, wxID_ANY, "UnBall 2D Manager", wxDefaultPosition, wxSize(900, 620)),
       appData_(std::filesystem::path(wxStandardPaths::Get().GetUserDataDir().ToStdString())),
       store_(appData_ / "teams.json"),
       outputTimer_(this) {
     try { store_.load(); }
     catch (const std::exception& error) {
-        wxMessageBox("Nao foi possivel ler os times: " + wxString::FromUTF8(error.what()), "UnBall-Manager2D", wxICON_WARNING);
+        wxMessageBox("Nao foi possivel ler os times: " + wxString::FromUTF8(error.what()), "UnBall 2D Manager", wxICON_WARNING);
     }
     const auto executableDirectory = std::filesystem::path(wxStandardPaths::Get().GetExecutablePath().ToStdString()).parent_path();
     auto extractorDirectory = executableDirectory / "extractor";
@@ -204,7 +204,7 @@ void MainFrame::buildUi() {
     configurationSizer->AddGrowableCol(1, 1);
     auto* configurationOuter = new wxBoxSizer(wxVERTICAL);
     configurationOuter->Add(new wxStaticText(configuration, wxID_ANY,
-        "Escolha os caminhos da sua instalação. O UnBall-Manager2D nao instala nem altera essas ferramentas."), 0, wxALL, 12);
+        "Escolha os caminhos da sua instalação. O UnBall 2D Manager não instala nem altera essas ferramentas."), 0, wxALL, 12);
     configurationOuter->Add(configurationSizer, 0, wxEXPAND | wxLEFT | wxRIGHT, 12);
     addButton(configuration, configurationOuter, "Salvar configuração", ControlId::SaveEnvironment);
     environment_ = new wxStaticText(configuration, wxID_ANY, "Verificando ambiente...");
@@ -263,7 +263,7 @@ void MainFrame::buildUi() {
     mark->SetToolTip("UnBall, Universidade de Brasília");
     identity->Add(mark, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 12);
     auto* identityText = new wxBoxSizer(wxVERTICAL);
-    auto* title = new wxStaticText(match, wxID_ANY, "UnBall Manager 2D");
+    auto* title = new wxStaticText(match, wxID_ANY, "UnBall 2D Manager");
     auto font = title->GetFont();
     font.SetWeight(wxFONTWEIGHT_BOLD);
     font.SetPointSize(font.GetPointSize() + 2);

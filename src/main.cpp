@@ -12,6 +12,7 @@ public:
     bool OnInit() override {
         std::setlocale(LC_CTYPE, "");
         SetClassName("unball-manager2d");
+        SetAppDisplayName("UnBall 2D Manager");
         const auto data = std::filesystem::path(wxStandardPaths::Get().GetUserDataDir().ToStdString());
         const auto executable = std::filesystem::path(wxStandardPaths::Get().GetExecutablePath().ToStdString());
         wxString skip;

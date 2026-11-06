@@ -1,6 +1,21 @@
-# UnBall-Manager2D
+# UnBall 2D Manager
 
-Interface nativa em C++20 e wxWidgets para cadastrar times, iniciar partidas do RoboCup 2D e abrir replays. Compatível com Linux e WSL com interface gráfica.
+Aplicação da UnBall para preparar partidas do RoboCup 2D, executar testes em lote e exportar os dados dos jogos para CSV. Feita em C++20 e wxWidgets para Linux e WSL com interface gráfica.
+
+## Interface
+
+### Partidas e testes em lote
+
+![UnBall 2D Manager: seleção dos times e controles de execução](assets/screenshots/partida.png)
+
+### Histórico e configuração
+
+<p>
+  <a href="assets/screenshots/historico.png"><img src="assets/screenshots/historico.png" width="49%" alt="Histórico com busca, filtros e acesso aos CSVs e replays"></a>
+  <a href="assets/screenshots/configuracao.png"><img src="assets/screenshots/configuracao.png" width="49%" alt="Configuração do ambiente e atualização da aplicação pelo GitHub"></a>
+</p>
+
+O histórico mostra partidas curtas usadas na validação. Os caminhos da configuração são exemplos. Clique nas imagens para ampliar.
 
 ## Compilar e executar
 

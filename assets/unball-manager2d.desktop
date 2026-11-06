@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=UnBall Manager 2D
+Name=UnBall 2D Manager
 Comment=Partidas, testes e dados do RoboCup 2D
 Exec=UnBall-Manager2D
 Icon=unball-manager2d
